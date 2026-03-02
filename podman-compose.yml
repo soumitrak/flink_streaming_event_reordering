@@ -1,0 +1,154 @@
+---
+# Podman Compose – Flink Clickstream Event Reordering local dev stack
+#
+# Services:
+#   kafka        – apache/kafka:latest  KRaft mode (no Zookeeper), native linux/arm64
+#                  Internal listener : kafka:9092   (used by Flink containers)
+#                  External listener : localhost:9094 (used by the Python producer on the host)
+#   kafka-ui     – Provectus Kafka-UI  → http://localhost:8080
+#   jobmanager   – apache/flink:2.2-java11 JobManager → http://localhost:8081  (native arm64)
+#   taskmanager  – apache/flink:2.2-java11 TaskManager (4 slots)              (native arm64)
+#
+# Notes:
+#   • platform: linux/arm64 is set on every service for Apple Silicon Macs.
+#     Remove or change to linux/amd64 if running on an Intel host.
+#   • depends_on uses simple list form (no condition:) because podman-compose
+#     does not support service_healthy conditions.  Readiness is handled by
+#     the wait-for-kafka / wait-for-flink targets in the Makefile instead.
+#
+# Run with:  podman-compose up -d
+# Tear down:  podman-compose down -v
+
+version: "3.8"
+
+networks:
+  clickstream-net:
+    driver: bridge
+
+volumes:
+  kafka-data:
+
+# ---------------------------------------------------------------------------
+# Re-usable YAML anchors
+# ---------------------------------------------------------------------------
+x-flink-common: &flink-common
+  # Flink 2.2 ships a native linux/arm64 image – no QEMU emulation needed.
+  image: apache/flink:2.2-java11
+  platform: linux/arm64
+  networks:
+    - clickstream-net
+  volumes:
+    # Mount the fat-JAR directory so Flink can load the job without a separate copy step.
+    - ./target:/opt/flink/usrlib:ro
+
+# ---------------------------------------------------------------------------
+services:
+# ---------------------------------------------------------------------------
+
+  # ---------- Kafka (KRaft – single broker) ----------
+  kafka:
+    # Official Apache Kafka image – proper multi-arch (linux/arm64 + linux/amd64),
+    # stable tags, KRaft built-in (no Zookeeper needed).
+    image: apache/kafka:latest
+    platform: linux/arm64
+    container_name: clickstream-kafka
+    hostname: kafka
+    networks:
+      - clickstream-net
+    ports:
+      # External listener for host-machine producers/consumers
+      - "9094:9094"
+    environment:
+      # KRaft identity – apache/kafka uses plain property names (no KAFKA_CFG_ prefix)
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      # Three listeners:
+      #   PLAINTEXT  – intra-container traffic (Flink → Kafka)
+      #   CONTROLLER – KRaft controller traffic (internal only)
+      #   EXTERNAL   – host-machine traffic (Python producer, kcat, console consumer)
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      # Sensible defaults for a dev broker
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: "2"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      # Fixed cluster ID required for KRaft formatting (base64url-encoded UUID)
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "/opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092"
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+
+  # ---------- Kafka UI (optional but useful for inspection) ----------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    platform: linux/arm64
+    container_name: clickstream-kafka-ui
+    hostname: kafka-ui
+    networks:
+      - clickstream-net
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "local"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9092"
+    depends_on:
+      - kafka
+
+  # ---------- Flink JobManager ----------
+  jobmanager:
+    <<: *flink-common
+    container_name: clickstream-jobmanager
+    hostname: jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      # Flink configuration (written to flink-conf.yaml by the entrypoint)
+      # state.checkpoints.dir is intentionally omitted for local dev so that
+      # Flink uses JobManagerCheckpointStorage (in-memory) and avoids
+      # directory-permission issues with Docker named volumes.
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.rpc.port: 6123
+        jobmanager.memory.process.size: 1600m
+        parallelism.default: 2
+      # Application-level env vars read by ClickStreamJob via System.getenv()
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_INPUT_TOPIC: "clickstream"
+      KAFKA_OUTPUT_TOPIC: "checkout-session"
+      KAFKA_CONSUMER_GROUP: "clickstream-reordering"
+    depends_on:
+      - kafka
+
+  # ---------- Flink TaskManager ----------
+  taskmanager:
+    <<: *flink-common
+    container_name: clickstream-taskmanager
+    hostname: taskmanager
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.rpc.port: 6123
+        taskmanager.memory.process.size: 1728m
+        taskmanager.numberOfTaskSlots: 4
+      # Same app-level vars needed because user code runs on the TaskManager JVM
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_INPUT_TOPIC: "clickstream"
+      KAFKA_OUTPUT_TOPIC: "checkout-session"
+      KAFKA_CONSUMER_GROUP: "clickstream-reordering"
+    depends_on:
+      - jobmanager

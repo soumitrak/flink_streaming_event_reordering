@@ -1,0 +1,35 @@
+# Maven build output
+target/
+dependency-reduced-pom.xml
+
+# Python virtualenv and cache
+scripts/.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Claude Code
+.claude/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Flink local state / checkpoints (if ever run outside containers)
+/tmp/flink-checkpoints/
+/tmp/flink-web-upload/
+
+# Podman / Docker volumes materialised on the host (unlikely but safe to ignore)
+kafka-data/
+flink-checkpoints/
+
+# Environment files (never commit secrets)
+.env
+.env.*
