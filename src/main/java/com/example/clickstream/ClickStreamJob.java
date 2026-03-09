@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.StateBackendOptions;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -54,6 +56,12 @@ public class ClickStreamJob {
 
         // ------------------------------------------------------------------ Flink env
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        // Switch to RocksDB state backend so the job uses disk-spilling incremental state
+        // (EmbeddedRocksDBStateBackend) instead of the default in-memory HashMap backend.
+        // The factory class is resolved from the fat JAR at runtime via the "rocksdb" alias.
+        Configuration rocksdbConfig = new Configuration();
+        rocksdbConfig.set(StateBackendOptions.STATE_BACKEND, "rocksdb");
+        env.configure(rocksdbConfig);
 
         // ------------------------------------------------------------------ Kafka source
         KafkaSource<String> kafkaSource = KafkaSource.<String>builder()

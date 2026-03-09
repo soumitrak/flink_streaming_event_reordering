@@ -10,8 +10,8 @@
 #   taskmanager  – apache/flink:2.2-java11 TaskManager (4 slots)              (native arm64)
 #
 # Notes:
-#   • platform: linux/arm64 is set on every service for Apple Silicon Macs.
-#     Remove or change to linux/amd64 if running on an Intel host.
+#   • platform is set via the PLATFORM env var (auto-detected by the Makefile).
+#     It defaults to linux/amd64 if not set.  Override: PLATFORM=linux/arm64 make up
 #   • depends_on uses simple list form (no condition:) because podman-compose
 #     does not support service_healthy conditions.  Readiness is handled by
 #     the wait-for-kafka / wait-for-flink targets in the Makefile instead.
@@ -32,9 +32,8 @@ volumes:
 # Re-usable YAML anchors
 # ---------------------------------------------------------------------------
 x-flink-common: &flink-common
-  # Flink 2.2 ships a native linux/arm64 image – no QEMU emulation needed.
   image: apache/flink:2.2-java11
-  platform: linux/arm64
+  platform: ${PLATFORM:-linux/amd64}
   networks:
     - clickstream-net
   volumes:
@@ -50,7 +49,7 @@ services:
     # Official Apache Kafka image – proper multi-arch (linux/arm64 + linux/amd64),
     # stable tags, KRaft built-in (no Zookeeper needed).
     image: apache/kafka:latest
-    platform: linux/arm64
+    platform: ${PLATFORM:-linux/amd64}
     container_name: clickstream-kafka
     hostname: kafka
     networks:
@@ -94,7 +93,7 @@ services:
   # ---------- Kafka UI (optional but useful for inspection) ----------
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
-    platform: linux/arm64
+    platform: ${PLATFORM:-linux/amd64}
     container_name: clickstream-kafka-ui
     hostname: kafka-ui
     networks:
@@ -125,6 +124,26 @@ services:
         jobmanager.rpc.port: 6123
         jobmanager.memory.process.size: 1600m
         parallelism.default: 2
+        state.backend.rocksdb.metrics.cur-size-active-mem-table: true
+        state.backend.rocksdb.metrics.cur-size-all-mem-tables: true
+        state.backend.rocksdb.metrics.size-all-mem-tables: true
+        state.backend.rocksdb.metrics.num-entries-active-mem-table: true
+        state.backend.rocksdb.metrics.num-entries-imm-mem-tables: true
+        state.backend.rocksdb.metrics.num-deletes-active-mem-table: true
+        state.backend.rocksdb.metrics.num-deletes-imm-mem-tables: true
+        state.backend.rocksdb.metrics.estimate-num-keys: true
+        state.backend.rocksdb.metrics.estimate-live-data-size: true
+        state.backend.rocksdb.metrics.total-sst-files-size: true
+        state.backend.rocksdb.metrics.live-sst-files-size: true
+        state.backend.rocksdb.metrics.estimate-pending-compaction-bytes: true
+        state.backend.rocksdb.metrics.num-running-compactions: true
+        state.backend.rocksdb.metrics.num-running-flushes: true
+        state.backend.rocksdb.metrics.actual-delayed-write-rate: true
+        state.backend.rocksdb.metrics.background-errors: true
+        state.backend.rocksdb.metrics.block-cache-capacity: true
+        state.backend.rocksdb.metrics.block-cache-usage: true
+        state.backend.rocksdb.metrics.block-cache-pinned-usage: true
+        state.backend.rocksdb.metrics.column-family-as-variable: true
       # Application-level env vars read by ClickStreamJob via System.getenv()
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_INPUT_TOPIC: "clickstream"
@@ -145,6 +164,26 @@ services:
         jobmanager.rpc.port: 6123
         taskmanager.memory.process.size: 1728m
         taskmanager.numberOfTaskSlots: 4
+        state.backend.rocksdb.metrics.cur-size-active-mem-table: true
+        state.backend.rocksdb.metrics.cur-size-all-mem-tables: true
+        state.backend.rocksdb.metrics.size-all-mem-tables: true
+        state.backend.rocksdb.metrics.num-entries-active-mem-table: true
+        state.backend.rocksdb.metrics.num-entries-imm-mem-tables: true
+        state.backend.rocksdb.metrics.num-deletes-active-mem-table: true
+        state.backend.rocksdb.metrics.num-deletes-imm-mem-tables: true
+        state.backend.rocksdb.metrics.estimate-num-keys: true
+        state.backend.rocksdb.metrics.estimate-live-data-size: true
+        state.backend.rocksdb.metrics.total-sst-files-size: true
+        state.backend.rocksdb.metrics.live-sst-files-size: true
+        state.backend.rocksdb.metrics.estimate-pending-compaction-bytes: true
+        state.backend.rocksdb.metrics.num-running-compactions: true
+        state.backend.rocksdb.metrics.num-running-flushes: true
+        state.backend.rocksdb.metrics.actual-delayed-write-rate: true
+        state.backend.rocksdb.metrics.background-errors: true
+        state.backend.rocksdb.metrics.block-cache-capacity: true
+        state.backend.rocksdb.metrics.block-cache-usage: true
+        state.backend.rocksdb.metrics.block-cache-pinned-usage: true
+        state.backend.rocksdb.metrics.column-family-as-variable: true
       # Same app-level vars needed because user code runs on the TaskManager JVM
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_INPUT_TOPIC: "clickstream"

@@ -21,6 +21,18 @@
 # installation requires it.
 COMPOSE         ?= podman-compose
 
+# Auto-detect the container platform based on the host CPU architecture.
+# Override on the command line if needed: make setup PLATFORM=linux/arm64
+_ARCH           := $(shell uname -m)
+ifeq ($(_ARCH),arm64)
+  PLATFORM      ?= linux/arm64
+else ifeq ($(_ARCH),aarch64)
+  PLATFORM      ?= linux/arm64
+else
+  PLATFORM      ?= linux/amd64
+endif
+export PLATFORM
+
 # Python interpreter used to create the virtualenv
 PYTHON          ?= python3
 
@@ -116,6 +128,7 @@ build:
 ## Start all containers in the background.
 up:
 	@printf '\n==> Starting containers …\n'
+	podman container prune -f
 	$(COMPOSE) up -d
 	@printf '\n==> Containers started. Kafka UI: http://localhost:8080  Flink UI: $(FLINK_REST)\n'
 
@@ -123,6 +136,7 @@ up:
 down:
 	@printf '\n==> Stopping containers …\n'
 	$(COMPOSE) down
+	podman container prune -f
 	@printf 'Done.\n'
 
 ## Start containers, wait for readiness, create topics.
