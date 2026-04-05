@@ -32,7 +32,8 @@ volumes:
 # Re-usable YAML anchors
 # ---------------------------------------------------------------------------
 x-flink-common: &flink-common
-  image: apache/flink:2.2-java11
+  #  image: apache/flink:2.2-java11
+  image: flink:2.3-SK
   platform: ${PLATFORM:-linux/amd64}
   networks:
     - clickstream-net
@@ -144,6 +145,7 @@ services:
         state.backend.rocksdb.metrics.block-cache-usage: true
         state.backend.rocksdb.metrics.block-cache-pinned-usage: true
         state.backend.rocksdb.metrics.column-family-as-variable: true
+        rest.flamegraph.enabled: true
       # Application-level env vars read by ClickStreamJob via System.getenv()
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_INPUT_TOPIC: "clickstream"
@@ -184,6 +186,11 @@ services:
         state.backend.rocksdb.metrics.block-cache-usage: true
         state.backend.rocksdb.metrics.block-cache-pinned-usage: true
         state.backend.rocksdb.metrics.column-family-as-variable: true
+        rest.flamegraph.enabled: true
+        state.backend.rocksdb.log.level: INFO_LEVEL
+        state.backend.rocksdb.log.dir: /tmp/flink-rocksdb-logs
+        state.backend.rocksdb.log.max-file-size: 67108864
+        state.backend.rocksdb.log.file-num: 4
       # Same app-level vars needed because user code runs on the TaskManager JVM
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_INPUT_TOPIC: "clickstream"

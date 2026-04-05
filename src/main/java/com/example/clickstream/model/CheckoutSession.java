@@ -34,6 +34,10 @@ public class CheckoutSession implements Serializable {
     @JsonProperty("event_names")
     private List<String> eventNames;
 
+    /** Price from the Checkout event's properties.price; null when not present */
+    @JsonProperty("price")
+    private Double price;
+
     // Required for Flink / Jackson serialization
     public CheckoutSession() {}
 
@@ -67,10 +71,14 @@ public class CheckoutSession implements Serializable {
     public List<String> getEventNames() { return eventNames; }
     public void setEventNames(List<String> eventNames) { this.eventNames = eventNames; }
 
+    public Double getPrice() { return price; }
+    public void setPrice(Double price) { this.price = price; }
+
     @Override
     public String toString() {
         return "CheckoutSession{userId=" + userId + ", sessionId='" + sessionId + '\'' +
                 ", startTime='" + startTime + '\'' + ", endTime='" + endTime + '\'' +
-                ", duration=" + duration + ", eventNames=" + eventNames + '}';
+                ", duration=" + duration + ", eventNames=" + eventNames +
+                ", price=" + price + '}';
     }
 }

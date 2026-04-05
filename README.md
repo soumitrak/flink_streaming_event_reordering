@@ -1,6 +1,6 @@
 # Flink Clickstream Event Reordering
 
-A Apache Flink 2.2 streaming application that reads clickstream events from Kafka, tolerates up to 5 minutes of out-of-order delivery, and emits a `CheckoutSession` record whenever a qualifying checkout sequence is detected.
+A Apache Flink 2.2 streaming application that reads clickstream events from Kafka, tolerates up to 5 minutes of out-of-order delivery, emits a `CheckoutSession` record whenever a qualifying checkout sequence is detected, and aggregates checkout prices over 5-minute processing-time tumbling windows using RocksDB's native MergeOperator for high-throughput state updates.
 
 ---
 
@@ -10,6 +10,7 @@ A Apache Flink 2.2 streaming application that reads clickstream events from Kafk
 - [Architecture](#architecture)
 - [Event Schemas](#event-schemas)
 - [Processing Logic](#processing-logic)
+- [Price Aggregation — RocksDB MergeOperator Design](#price-aggregation--rocksdb-mergeoperator-design)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Building](#building)
@@ -48,6 +49,7 @@ Key constraints:
                    ClickStreamParser
                    (FlatMapFunction)
                    • Parse JSON → ClickStream POJO
+                   • Extract optional properties.price
                    • Drop records with missing/invalid fields
                             │
                             ▼
@@ -59,17 +61,34 @@ Key constraints:
               • Sorted per-key event buffer
               • Part 1: event-time flush when span > 6 min
               • Part 2: wall-clock idle flush after 5 min
+              • Copies price from Checkout event into session
               • Emits CheckoutSession on detection
                             │
-                            ▼
-              CheckoutSessionSerializer (MapFunction)
-              • Serialize CheckoutSession → JSON string
-                            │ KafkaSink (idempotent producer)
-                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  Kafka topic: checkout-session                                   │
-│  (JSON CheckoutSession records)                                  │
-└──────────────────────────────────────────────────────────────────┘
+               ┌────────────┴────────────┐
+               │                         │
+               ▼                         ▼
+  CheckoutSessionSerializer    .keyBy(_ → "global")
+  • Serialize → JSON                     │
+               │               PriceStatsWindowFunction
+               │               (KeyedProcessFunction)
+               │               • 5-min processing-time window
+               │               • ReducingState → min, max price
+               │                 (RocksDBReducingMergeState)
+               │               • AggregatingState → avg price
+               │                 (RocksDBAggregatingMergeState)
+               │               • Emits PriceStats at window end
+               │                         │
+               │               PriceStatsSerializer
+               │               • Serialize → JSON
+               │                         │
+  KafkaSink (idempotent)      KafkaSink (idempotent)
+               │                         │
+               ▼                         ▼
+┌──────────────────────┐   ┌─────────────────────────────────┐
+│  checkout-session    │   │  price-stats                    │
+│  (CheckoutSession    │   │  (PriceStats per 5-min window)  │
+│   JSON records)      │   └─────────────────────────────────┘
+└──────────────────────┘
 ```
 
 The local development stack (managed by `podman-compose`) adds:
@@ -84,16 +103,18 @@ The local development stack (managed by `podman-compose`) adds:
 
 ### Input — `clickstream` topic
 
-Each message is a JSON object. The Flink app reads the four required fields; all other fields are ignored.
+Each message is a JSON object. The four top-level fields are required; `properties.price` is optional and read when present.
 
 ```json
 {
   "user_id":    1042,
   "session_id": "a3f8c2d1-...",
   "event_time": "15/03/2025 14:22:07.483201",
-  "event_name": "AddToCart",
-  "properties": { ... },
-  "context":    { ... }
+  "event_name": "Checkout",
+  "properties": {
+    "price": 49.99
+  },
+  "context": { ... }
 }
 ```
 
@@ -103,8 +124,9 @@ Each message is a JSON object. The Flink app reads the four required fields; all
 | `session_id` | string | UUID | yes |
 | `event_time` | string | `dd/MM/yyyy HH:mm:ss.SSSSSS` | yes |
 | `event_name` | string | e.g. `HomePage`, `Checkout` | yes |
+| `properties.price` | number | decimal | no |
 
-Records with a missing, blank, or unparseable required field are silently dropped by `ClickStreamParser`.
+Records with a missing, blank, or unparseable required field are silently dropped by `ClickStreamParser`. A missing `properties.price` is treated as absent — the event is still processed, and the resulting `CheckoutSession` will have a `null` price.
 
 ### Output — `checkout-session` topic
 
@@ -115,7 +137,8 @@ Records with a missing, blank, or unparseable required field are silently droppe
   "start_time":  "15/03/2025 14:21:30.112000",
   "end_time":    "15/03/2025 14:22:07.483201",
   "duration":    37,
-  "event_names": ["ProductPage", "AddToCart", "Checkout"]
+  "event_names": ["ProductPage", "AddToCart", "Checkout"],
+  "price":       49.99
 }
 ```
 
@@ -127,6 +150,33 @@ Records with a missing, blank, or unparseable required field are silently droppe
 | `end_time` | string | `event_time` of the `Checkout` event |
 | `duration` | long | `end_time − start_time` in seconds |
 | `event_names` | string array | Ordered names of events in the sequence (≤ 5, ends with `Checkout`) |
+| `price` | number \| null | Price from the `Checkout` event's `properties.price`; absent when not set |
+
+### Output — `price-stats` topic
+
+One record is emitted per 5-minute processing-time tumbling window, aggregated globally across all users and sessions.
+
+```json
+{
+  "window_start": 1741650000000,
+  "window_end":   1741650300000,
+  "min_price":    9.99,
+  "max_price":    199.00,
+  "avg_price":    54.32,
+  "count":        42
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `window_start` | long | Epoch-ms of the inclusive window start |
+| `window_end` | long | Epoch-ms of the exclusive window end |
+| `min_price` | number | Minimum checkout price in the window |
+| `max_price` | number | Maximum checkout price in the window |
+| `avg_price` | number | Mean checkout price in the window |
+| `count` | long | Number of priced checkout events in the window |
+
+Windows containing no priced checkouts produce no output.
 
 ---
 
@@ -167,6 +217,104 @@ See [WINDOWING_ANALYSIS.md](WINDOWING_ANALYSIS.md) for a detailed comparison of 
 
 ---
 
+## Price Aggregation — RocksDB MergeOperator Design
+
+`PriceStatsWindowFunction` implements a 5-minute processing-time tumbling window as a `KeyedProcessFunction`. All `CheckoutSession` records are re-keyed to the constant `"global"` so that min/max/average are computed across the entire stream.
+
+### The problem with naive read-modify-write state
+
+With the default `ValueState`, every incoming event requires a full **read → deserialize → update → serialize → write** round-trip to RocksDB. For high-cardinality aggregations under sustained load this creates a bottleneck: each write is a point update that forces a full value rewrite into the LSM-tree, and every compaction must merge duplicates on the write path.
+
+### How FRocksDB's MergeOperator eliminates the read
+
+[FRocksDB](https://github.com/ververica/frocksdb) — the Flink-maintained fork of RocksDB — supports RocksDB's native **`AssociativeMergeOperator`** interface. Rather than reading the current value and writing back a new one, a merge operation appends a *merge operand* directly to the LSM-tree write path:
+
+```
+write path:  Merge(key, operand)  →  WAL  →  MemTable   (O(1), no read)
+read path:   Get(key)             →  combine base value + all operands lazily
+compaction:  operands are folded into the base value in the background
+```
+
+This means state updates are **pure appends** — no read is required on the hot write path. The actual combining work is deferred to reads and background compaction, which is exactly the right trade-off for a windowed aggregation that writes many values per window but reads only once (at the timer).
+
+### How Flink exposes the MergeOperator
+
+When the **RocksDB state backend** is active, Flink automatically provisions the efficient merge-backed state types in place of the generic `ValueState`:
+
+| Flink state descriptor | RocksDB state type (internal) | Merge semantics |
+|---|---|---|
+| `ReducingStateDescriptor(Math::min)` | `RocksDBReducingMergeState` | Each `add(v)` call appends `v` as a merge operand; the `ReduceFunction` is used as the associative combiner |
+| `ReducingStateDescriptor(Math::max)` | `RocksDBReducingMergeState` | Same pattern; combiner is `Math::max` |
+| `AggregatingStateDescriptor(AvgAggregateFunction)` | `RocksDBAggregatingMergeState` | Each `add(v)` appends `v` as an operand; `AggregateFunction.merge` is the combiner used during compaction and reads |
+
+No code changes are needed to opt in — registering the right descriptor with a RocksDB-backed environment is sufficient.
+
+### State layout in `PriceStatsWindowFunction`
+
+```
+Key: "global"  (all sessions aggregated together)
+
+minPriceState  ──  ReducingState<Double>
+                   ReduceFunction: Math::min
+                   → RocksDBReducingMergeState: each add() is a RocksDB Merge call
+
+maxPriceState  ──  ReducingState<Double>
+                   ReduceFunction: Math::max
+                   → RocksDBReducingMergeState: each add() is a RocksDB Merge call
+
+avgPriceState  ──  AggregatingState<Double, AvgAccumulator, Double>
+                   AggregateFunction: AvgAggregateFunction
+                   Accumulator: { sum: double, count: long }
+                   merge(): new AvgAccumulator(a.sum + b.sum, a.count + b.count)
+                   → RocksDBAggregatingMergeState: each add() is a RocksDB Merge call
+
+countState     ──  ReducingState<Long>
+                   ReduceFunction: Long::sum
+                   → RocksDBReducingMergeState: each add(1L) is a RocksDB Merge call
+
+windowEndState ──  ValueState<Long>
+                   Epoch-ms of the registered processing-time timer
+                   (read/written once per window; standard ValueState is fine here)
+```
+
+### Window lifecycle
+
+```
+  event arrives with price
+          │
+          ▼
+  minPriceState.add(price)   ← RocksDB Merge (append-only, no read)
+  maxPriceState.add(price)   ← RocksDB Merge (append-only, no read)
+  avgPriceState.add(price)   ← RocksDB Merge (append-only, no read)
+  countState.add(1L)         ← RocksDB Merge (append-only, no read)
+          │
+          ▼
+  if windowEndState is null:
+    register processing-time timer at next 5-min boundary
+    store timer timestamp in windowEndState
+          │
+         ...  (more events arrive, each appending merge operands)
+          │
+          ▼
+  processing-time timer fires at window boundary
+          │
+          ▼
+  min   = minPriceState.get()   ← single RocksDB read + lazy merge fold
+  max   = maxPriceState.get()   ← single RocksDB read + lazy merge fold
+  avg   = avgPriceState.get()   ← single RocksDB read + lazy merge fold
+  count = countState.get()      ← single RocksDB read + lazy merge fold
+          │
+          ▼
+  emit PriceStats { window_start, window_end, min, max, avg, count }
+          │
+          ▼
+  clear all state  ← next window starts fresh
+```
+
+The merge operands accumulated throughout the window are folded into the final value exactly **once per window** at read time, rather than on every incoming event. For a window receiving thousands of `CheckoutSession` records per minute, this substantially reduces RocksDB write amplification and CPU cost compared to a `ValueState`-based implementation.
+
+---
+
 ## Project Structure
 
 ```
@@ -181,13 +329,17 @@ flink_streaming_event_reordering/
 │   └── requirements.txt                 # faker, kafka-python
 │
 └── src/main/java/com/example/clickstream/
-    ├── ClickStreamJob.java              # Main entry point; wires Kafka source/sink
+    ├── ClickStreamJob.java              # Main entry point; wires both Kafka source/sinks
     ├── model/
-    │   ├── ClickStream.java             # Input POJO (userId, sessionId, eventTime, eventName, eventTimeMillis)
-    │   └── CheckoutSession.java         # Output POJO with @JsonProperty snake_case fields
+    │   ├── ClickStream.java             # Input POJO; includes optional price field
+    │   ├── CheckoutSession.java         # Checkout output POJO; carries price from Checkout event
+    │   └── PriceStats.java             # Price aggregation output POJO (min/max/avg per window)
     └── function/
-        ├── ClickStreamParser.java       # FlatMapFunction: JSON string → ClickStream; drops bad records
-        └── ClickStreamProcessFunction.java  # KeyedProcessFunction: reorder + checkout detection
+        ├── ClickStreamParser.java       # FlatMapFunction: JSON → ClickStream; reads properties.price
+        ├── ClickStreamProcessFunction.java  # KeyedProcessFunction: reorder + checkout detection
+        └── PriceStatsWindowFunction.java    # KeyedProcessFunction: 5-min tumbling window price stats
+                                             # Uses ReducingState (RocksDBReducingMergeState) for min/max
+                                             # Uses AggregatingState (RocksDBAggregatingMergeState) for avg
 ```
 
 ---
@@ -231,7 +383,7 @@ All steps below are driven by the `Makefile`. Run `make help` for the full targe
 make setup
 ```
 
-This starts Kafka, Kafka UI, and the Flink cluster, waits for each service to become ready, and creates the `clickstream` and `checkout-session` topics. On success:
+This starts Kafka, Kafka UI, and the Flink cluster, waits for each service to become ready, and creates the `clickstream`, `checkout-session`, and `price-stats` topics. On success:
 
 ```
 ==> Setup complete!
@@ -278,13 +430,20 @@ make produce N=500 CHECKOUT_RATIO=0.9 LATE_RATIO=0.5
 ### 4. Observe output
 
 ```bash
-make consume          # tail checkout-session topic (Ctrl-C to exit)
+make consume                # tail checkout-session topic (Ctrl-C to exit)
+make consume-price-stats    # tail price-stats topic (Ctrl-C to exit)
 ```
 
-Output format (one record per line):
+Checkout session output (one record per line):
 
 ```
-CreateTime:1741650127483  1042_a3f8c2d1-... | {"user_id":1042,"session_id":"a3f8c2d1-...","start_time":"...","end_time":"...","duration":37,"event_names":["ProductPage","AddToCart","Checkout"]}
+CreateTime:1741650127483  null | {"user_id":1042,"session_id":"a3f8c2d1-...","start_time":"...","end_time":"...","duration":37,"event_names":["ProductPage","AddToCart","Checkout"],"price":49.99}
+```
+
+Price stats output (one record emitted per 5-minute window):
+
+```
+CreateTime:1741650300000  null | {"window_start":1741650000000,"window_end":1741650300000,"min_price":9.99,"max_price":199.00,"avg_price":54.32,"count":42}
 ```
 
 Browse events visually in the Kafka UI at `http://localhost:8080`.
@@ -314,7 +473,8 @@ The Flink job reads all Kafka configuration from environment variables. These ar
 |---|---|---|
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka broker address |
 | `KAFKA_INPUT_TOPIC` | `clickstream` | Source topic |
-| `KAFKA_OUTPUT_TOPIC` | `checkout-session` | Sink topic |
+| `KAFKA_OUTPUT_TOPIC` | `checkout-session` | Checkout session sink topic |
+| `KAFKA_PRICE_STATS_TOPIC` | `price-stats` | Price aggregation sink topic |
 | `KAFKA_CONSUMER_GROUP` | `clickstream-reordering` | Consumer group ID |
 
 ### Key constants in `ClickStreamProcessFunction`
@@ -338,3 +498,6 @@ These are compile-time constants; change them in the source and rebuild if you n
 - [WINDOWING_ANALYSIS.md](WINDOWING_ANALYSIS.md) — Detailed comparison of Flink windowing alternatives (tumbling, sliding, session) versus the custom `KeyedProcessFunction` approach.
 - [Apache Flink 2.2 Documentation](https://nightlies.apache.org/flink/flink-docs-release-2.2/)
 - [Flink Kafka Connector 4.x](https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/)
+- [FRocksDB — Flink's RocksDB fork](https://github.com/ververica/frocksdb) — Source for `RocksDBReducingMergeState` and `RocksDBAggregatingMergeState`; contains the `AssociativeMergeOperator` implementations wired up by Flink's state backend.
+- [RocksDB Merge Operator wiki](https://github.com/facebook/rocksdb/wiki/Merge-Operator) — Explains the read/write/compaction mechanics that make merge-backed state updates cheaper than read-modify-write.
+- [Flink Managed State docs](https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/state/) — `ReducingState`, `AggregatingState`, and state backend configuration.

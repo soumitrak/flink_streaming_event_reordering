@@ -363,13 +363,16 @@ public class ClickStreamProcessFunction
                 .map(ClickStream::getEventName)
                 .collect(Collectors.toList());
 
-        return new CheckoutSession(
+        CheckoutSession session = new CheckoutSession(
                 first.getUserId(),
                 first.getSessionId(),
                 first.getEventTime(),
                 last.getEventTime(),
                 durationSeconds,
                 eventNames);
+        // last event is the Checkout event; carry its price (may be null) into the session.
+        session.setPrice(last.getPrice());
+        return session;
     }
 
     /**

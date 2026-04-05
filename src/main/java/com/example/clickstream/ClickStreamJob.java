@@ -2,8 +2,10 @@ package com.example.clickstream;
 
 import com.example.clickstream.function.ClickStreamParser;
 import com.example.clickstream.function.ClickStreamProcessFunction;
+import com.example.clickstream.function.PriceStatsWindowFunction;
 import com.example.clickstream.model.CheckoutSession;
 import com.example.clickstream.model.ClickStream;
+import com.example.clickstream.model.PriceStats;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -38,10 +40,11 @@ import java.util.Properties;
  * <p>Configuration is read from the following environment variables (with defaults
  * suitable for local development):
  * <ul>
- *   <li>{@code KAFKA_BOOTSTRAP_SERVERS}  – default {@code localhost:9092}</li>
- *   <li>{@code KAFKA_INPUT_TOPIC}        – default {@code clickstream}</li>
- *   <li>{@code KAFKA_OUTPUT_TOPIC}       – default {@code checkout-session}</li>
- *   <li>{@code KAFKA_CONSUMER_GROUP}     – default {@code clickstream-reordering}</li>
+ *   <li>{@code KAFKA_BOOTSTRAP_SERVERS}    – default {@code localhost:9092}</li>
+ *   <li>{@code KAFKA_INPUT_TOPIC}          – default {@code clickstream}</li>
+ *   <li>{@code KAFKA_OUTPUT_TOPIC}         – default {@code checkout-session}</li>
+ *   <li>{@code KAFKA_PRICE_STATS_TOPIC}    – default {@code price-stats}</li>
+ *   <li>{@code KAFKA_CONSUMER_GROUP}       – default {@code clickstream-reordering}</li>
  * </ul>
  */
 public class ClickStreamJob {
@@ -49,10 +52,11 @@ public class ClickStreamJob {
     public static void main(String[] args) throws Exception {
 
         // ------------------------------------------------------------------ configuration
-        String bootstrapServers = envOrDefault("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
-        String inputTopic       = envOrDefault("KAFKA_INPUT_TOPIC",        "clickstream");
-        String outputTopic      = envOrDefault("KAFKA_OUTPUT_TOPIC",       "checkout-session");
-        String consumerGroup    = envOrDefault("KAFKA_CONSUMER_GROUP",     "clickstream-reordering");
+        String bootstrapServers  = envOrDefault("KAFKA_BOOTSTRAP_SERVERS",  "localhost:9092");
+        String inputTopic        = envOrDefault("KAFKA_INPUT_TOPIC",         "clickstream");
+        String outputTopic       = envOrDefault("KAFKA_OUTPUT_TOPIC",        "checkout-session");
+        String priceStatsTopic   = envOrDefault("KAFKA_PRICE_STATS_TOPIC",   "price-stats");
+        String consumerGroup     = envOrDefault("KAFKA_CONSUMER_GROUP",      "clickstream-reordering");
 
         // ------------------------------------------------------------------ Flink env
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -117,6 +121,30 @@ public class ClickStreamJob {
                 .sinkTo(kafkaSink)
                 .name("Kafka-checkout-session-sink");
 
+        // ------------------------------------------------------------------ price-stats sink
+        KafkaSink<String> priceStatsSink = KafkaSink.<String>builder()
+                .setBootstrapServers(bootstrapServers)
+                .setKafkaProducerConfig(producerProps)
+                .setRecordSerializer(
+                        KafkaRecordSerializationSchema.<String>builder()
+                                .setTopic(priceStatsTopic)
+                                .setValueSerializationSchema(new SimpleStringSchema())
+                                .build())
+                .build();
+
+        // 5-minute processing-time tumbling window: aggregate min, max, and average checkout
+        // prices using ReducingState (→ RocksDBReducingMergeState) for min/max and
+        // AggregatingState (→ RocksDBAggregatingMergeState) for the running average.
+        // Key by constant "global" so all sessions contribute to the same aggregation.
+        checkoutStream
+                .keyBy(session -> "global")
+                .process(new PriceStatsWindowFunction())
+                .name("price-stats-5min-window")
+                .map(new PriceStatsSerializer())
+                .name("serialize-price-stats")
+                .sinkTo(priceStatsSink)
+                .name("Kafka-price-stats-sink");
+
         // ------------------------------------------------------------------ execute
         env.execute("Flink Clickstream Event Reordering");
     }
@@ -144,6 +172,24 @@ public class ClickStreamJob {
                 mapper.disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
             }
             return mapper.writeValueAsString(session);
+        }
+    }
+
+    /**
+     * Serializes a {@link PriceStats} to a compact JSON string.
+     */
+    private static class PriceStatsSerializer implements MapFunction<PriceStats, String> {
+
+        private static final long serialVersionUID = 1L;
+        private transient ObjectMapper mapper;
+
+        @Override
+        public String map(PriceStats stats) throws Exception {
+            if (mapper == null) {
+                mapper = new ObjectMapper();
+                mapper.disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
+            }
+            return mapper.writeValueAsString(stats);
         }
     }
 }

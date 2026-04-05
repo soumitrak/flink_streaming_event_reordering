@@ -73,6 +73,15 @@ public class ClickStreamParser implements FlatMapFunction<String, ClickStream> {
             // explicitly to avoid a second parse.
             cs.setEventTimeMillis(eventTimeMillis);
 
+            // ---- extract optional price from properties.price ----
+            JsonNode propertiesNode = root.get("properties");
+            if (propertiesNode != null && !propertiesNode.isNull()) {
+                JsonNode priceNode = propertiesNode.get("price");
+                if (priceNode != null && !priceNode.isNull() && priceNode.isNumber()) {
+                    cs.setPrice(priceNode.asDouble());
+                }
+            }
+
             out.collect(cs);
 
         } catch (Exception e) {

@@ -22,6 +22,7 @@ public class ClickStream implements Serializable, Comparable<ClickStream> {
     private String eventTime;       // original string, preserved for output
     private String eventName;
     private long eventTimeMillis;   // derived epoch-millis used for ordering and windowing
+    private Double price;           // optional; populated from properties.price in the input JSON
 
     // Required for Flink POJO serialization
     public ClickStream() {}
@@ -68,9 +69,13 @@ public class ClickStream implements Serializable, Comparable<ClickStream> {
     public long getEventTimeMillis() { return eventTimeMillis; }
     public void setEventTimeMillis(long eventTimeMillis) { this.eventTimeMillis = eventTimeMillis; }
 
+    public Double getPrice() { return price; }
+    public void setPrice(Double price) { this.price = price; }
+
     @Override
     public String toString() {
         return "ClickStream{userId=" + userId + ", sessionId='" + sessionId + '\'' +
-                ", eventTime='" + eventTime + '\'' + ", eventName='" + eventName + "'}";
+                ", eventTime='" + eventTime + '\'' + ", eventName='" + eventName + '\'' +
+                ", price=" + price + '}';
     }
 }
