@@ -2,7 +2,6 @@ package com.example.clickstream.function;
 
 import com.example.clickstream.model.CheckoutSession;
 import com.example.clickstream.model.ClickStream;
-
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
@@ -15,10 +14,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.ArrayDeque;
-import java.util.Deque;
-import java.util.List;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
 /**
@@ -35,41 +33,45 @@ import java.util.stream.Collectors;
  * <p>Timers are processing-time timers fired every 30 seconds so that the flush logic
  * runs even when no new events arrive for a key.
  */
-public class ClickStreamProcessFunction
+public class ClickStreamReorderUsingHeap
         extends KeyedProcessFunction<String, ClickStream, CheckoutSession> {
 
     private static final long serialVersionUID = 1L;
-    private static final Logger LOG = LoggerFactory.getLogger(ClickStreamProcessFunction.class);
+    private static final Logger LOG = LoggerFactory.getLogger(ClickStreamReorderUsingHeap.class);
 
     // ------------------------------------------------------------------ constants
 
     /** State TTL – entries idle longer than this are garbage-collected. */
-    private static final long STATE_TTL_MINUTES = 10L;
+    public static final long STATE_TTL_MINUTES = 10L;
 
     /** Maximum late arrival time. */
-    private static final long MAX_LATENESS_MS = 5L * 60 * 1_000;
+    public static final long MAX_LATENESS_MS = 1L * 60 * 1_000;
 
-    /** The checkout-window width: a Checkout must occur within 1 minute of the window start. */
-    private static final long CHECKOUT_WINDOW_MS = 1L * 60 * 1_000;
+    /** The checkout-window width: a Checkout must occur within 5 minute of the window start. */
+    public static final long CHECKOUT_WINDOW_MS = 1L * 60 * 1_000;
 
     /**
      * The minimum span (maxEventTime − minEventTime) that must exist in the buffer
      * before we are confident that the 1-minute checkout window is fully populated
      * (accounts for 5-min late arrivals + 1-min window = 6 min).
      */
-    private static final long TRIGGER_SPAN_MS = MAX_LATENESS_MS + CHECKOUT_WINDOW_MS;
+    public static final long TRIGGER_SPAN_MS = MAX_LATENESS_MS + CHECKOUT_WINDOW_MS;
 
     /**
      * If no new event has been received for this long (wall-clock), flush the buffer
      * regardless of the event-time span.
      */
-    private static final long IDLE_FLUSH_MS = MAX_LATENESS_MS;
+    public static final long IDLE_FLUSH_MS = MAX_LATENESS_MS;
 
     /** Maximum number of events tracked in the sliding window leading to a Checkout. */
-    private static final int MAX_WINDOW_SIZE = 5;
+    public static final int MAX_WINDOW_SIZE = 100;
 
     /** Interval between processing-time timers. */
-    private static final long TIMER_INTERVAL_MS = 30L * 1_000;
+    public static final long TIMER_INTERVAL_MS = 10L * 1_000;
+
+    /** Comparator that orders {@link ClickStream} events by ascending event-time. */
+    public static final Comparator<ClickStream> BY_EVENT_TIME =
+            Comparator.comparingLong(ClickStream::getEventTimeMillis);
 
     // ------------------------------------------------------------------ state descriptors
 
@@ -77,7 +79,7 @@ public class ClickStreamProcessFunction
      * Sorted buffer of received events, keyed by (user_id, session_id).
      * Maintained in ascending event-time order.
      */
-    private ValueState<ArrayList<ClickStream>> bufferState;
+    private transient ConcurrentMap<String, ArrayList<ClickStream>> bufferMap;
 
     /**
      * Wall-clock time (epoch ms) at which the event carrying {@code maxEventTime} was
@@ -108,19 +110,14 @@ public class ClickStreamProcessFunction
                 .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
                 .build();
 
-        ValueStateDescriptor<ArrayList<ClickStream>> bufferDesc =
-                new ValueStateDescriptor<>(
-                        "buffer",
-                        TypeInformation.of(new TypeHint<ArrayList<ClickStream>>() {}));
-        bufferDesc.enableTimeToLive(ttlConfig);
-        bufferState = getRuntimeContext().getState(bufferDesc);
-
         ValueStateDescriptor<Long> maxETRDesc = new ValueStateDescriptor<>("maxEventTimeReceived", Long.class);
         maxETRDesc.enableTimeToLive(ttlConfig);
         maxEventTimeReceivedState = getRuntimeContext().getState(maxETRDesc);
 
         ValueStateDescriptor<Long> timerDesc = new ValueStateDescriptor<>("currentTimer", Long.class);
         currentTimerState = getRuntimeContext().getState(timerDesc);
+
+        bufferMap = new ConcurrentHashMap<>();
     }
 
     // ------------------------------------------------------------------ processElement
@@ -132,11 +129,10 @@ public class ClickStreamProcessFunction
         currentKey = ctx.getCurrentKey();
 
         // ---- read current state ----
-        ArrayList<ClickStream> buffer = bufferState.value();
-        if (buffer == null) {
-            buffer = new ArrayList<>();
-            LOG.info("Buffer CREATED key={}", currentKey);
-        }
+        ArrayList<ClickStream> buffer = bufferMap.computeIfAbsent(currentKey, k -> {
+            LOG.info("SK: Buffer CREATED key={}", k);
+            return new ArrayList<ClickStream>();
+        });
 
         Long maxETR = maxEventTimeReceivedState.value();
 
@@ -151,20 +147,20 @@ public class ClickStreamProcessFunction
 
         // ---- insert event into the sorted buffer ----
         insertSorted(buffer, event);
+        LOG.info("SK: Buffer length={} key={}", buffer.size(), currentKey);
 
         // ---- persist updated state before calling process() ----
-        bufferState.update(buffer);
         maxEventTimeReceivedState.update(maxETR);
 
         // ---- run the core processing logic ----
-        process(out);
+        // process(buffer, out);
 
         // ---- re-read buffer after process() may have shrunk it ----
-        buffer = bufferState.value();
-        if (buffer == null || buffer.isEmpty()) {
+        if (buffer.isEmpty()) {
             clearAllState(ctx);
-        } else {
-            rescheduleTimer(ctx, now);
+        } else if (currentTimerState.value() == null) {
+            // Set timer the first time, the ongoing should be set from onTimer method.
+            rescheduleTimer(ctx, currentTimerState, now);
         }
     }
 
@@ -175,19 +171,19 @@ public class ClickStreamProcessFunction
                         OnTimerContext ctx,
                         Collector<CheckoutSession> out) throws Exception {
         currentKey = ctx.getCurrentKey();
+        ArrayList<ClickStream> buffer = bufferMap.get(currentKey);
 
         // The timer has fired – clear the timer tracking state.
         currentTimerState.clear();
 
         // ---- run the core processing logic ----
-        process(out);
+        process(maxEventTimeReceivedState.value(), buffer, out);
 
         // ---- decide whether to re-schedule or clean up ----
-        ArrayList<ClickStream> buffer = bufferState.value();
         if (buffer == null || buffer.isEmpty()) {
             clearAllState(ctx);
         } else {
-            rescheduleTimer(ctx, System.currentTimeMillis());
+            rescheduleTimer(ctx, currentTimerState, System.currentTimeMillis());
         }
     }
 
@@ -211,11 +207,8 @@ public class ClickStreamProcessFunction
      * than {@value #IDLE_FLUSH_MS} ms we perform a best-effort scan to find any Checkout
      * in the remaining buffer, emit it if found, and then discard all remaining events.
      */
-    private void process(Collector<CheckoutSession> out) throws Exception {
-        ArrayList<ClickStream> buffer = bufferState.value();
+    static void process(Long maxETR, ArrayList<ClickStream> buffer, Collector<CheckoutSession> out) throws Exception {
         if (buffer == null || buffer.isEmpty()) return;
-
-        Long maxETR = maxEventTimeReceivedState.value();
 
         // minET and maxET are derived directly from the sorted buffer.
         long minET = buffer.get(0).getEventTimeMillis();
@@ -268,7 +261,6 @@ public class ClickStreamProcessFunction
                     maxET = buffer.get(buffer.size() - 1).getEventTimeMillis();
                 } else {
                     // Buffer is now empty – clear wall-clock tracking state.
-                    maxEventTimeReceivedState.clear();
                     break;
                 }
 
@@ -285,8 +277,9 @@ public class ClickStreamProcessFunction
             }
         }
 
-        // Persist the (potentially trimmed) buffer.
-        bufferState.update(buffer);
+        if (buffer.size() > MAX_WINDOW_SIZE) {
+            LOG.info("SK: ERROR buffer size is {}, should be < {}", buffer.size(), MAX_WINDOW_SIZE);
+        }
 
         // ========================= Part 2 =========================
         // If no new event has arrived for IDLE_FLUSH_MS ms, perform a best-effort flush.
@@ -320,10 +313,7 @@ public class ClickStreamProcessFunction
                 LOG.info("No Checkout found during idle flush – discarding buffer.");
             }
 
-            // Discard everything regardless of whether we emitted.
             buffer.clear();
-            bufferState.update(buffer);
-            maxEventTimeReceivedState.clear();
         }
     }
 
@@ -333,18 +323,12 @@ public class ClickStreamProcessFunction
      * Inserts {@code event} into {@code buffer} maintaining ascending event-time order.
      * Uses binary search for O(log n) probe + O(n) shift.
      */
-    private void insertSorted(ArrayList<ClickStream> buffer, ClickStream event) {
-        int lo = 0;
-        int hi = buffer.size();
-        while (lo < hi) {
-            int mid = (lo + hi) >>> 1;
-            if (buffer.get(mid).getEventTimeMillis() <= event.getEventTimeMillis()) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        buffer.add(lo, event);
+    static void insertSorted(ArrayList<ClickStream> buffer, ClickStream event) {
+        int idx = Collections.binarySearch(buffer, event, BY_EVENT_TIME);
+        // binarySearch returns -(insertion point) - 1 when no match exists;
+        // when a match exists, insert just after it to preserve arrival order among ties.
+        int insertionPoint = (idx >= 0) ? idx + 1 : -(idx + 1);
+        buffer.add(insertionPoint, event);
     }
 
     /**
@@ -352,7 +336,7 @@ public class ClickStreamProcessFunction
      * The first event provides start_time/user_id/session_id; the last event (Checkout)
      * provides end_time.
      */
-    private CheckoutSession buildSession(List<ClickStream> events) {
+    static CheckoutSession buildSession(List<ClickStream> events) {
         ClickStream first   = events.get(0);
         ClickStream last    = events.get(events.size() - 1);   // Checkout event
 
@@ -379,8 +363,8 @@ public class ClickStreamProcessFunction
      * Cancels the existing processing-time timer (if any) and registers a new one
      * {@value #TIMER_INTERVAL_MS} ms in the future.
      */
-    private void rescheduleTimer(KeyedProcessFunction<String, ClickStream, CheckoutSession>.Context ctx,
-                                 long now) throws Exception {
+    static void rescheduleTimer(KeyedProcessFunction<String, ClickStream, CheckoutSession>.Context ctx,
+                                ValueState<Long> currentTimerState, long now) throws Exception {
         Long existing = currentTimerState.value();
         if (existing != null) {
             ctx.timerService().deleteProcessingTimeTimer(existing);
@@ -400,7 +384,7 @@ public class ClickStreamProcessFunction
         if (existing != null) {
             ctx.timerService().deleteProcessingTimeTimer(existing);
         }
-        bufferState.clear();
+        bufferMap.remove(currentKey);
         maxEventTimeReceivedState.clear();
         currentTimerState.clear();
     }

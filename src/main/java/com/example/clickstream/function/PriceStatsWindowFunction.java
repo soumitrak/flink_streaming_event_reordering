@@ -94,7 +94,7 @@ public class PriceStatsWindowFunction
      * Backed by {@code RocksDBAggregatingMergeState}: input {@code Double} values are
      * appended as raw merge operands and folded lazily by {@link AvgAggregateFunction}.
      */
-    private AggregatingMergeState<Double, Double> avgPriceState;
+    private AggregatingMergeState<Double, AvgAccumulator, Double> avgPriceState;
 
     /**
      * Number of priced checkout events in the window.
@@ -123,33 +123,7 @@ public class PriceStatsWindowFunction
         avgPriceState = getRuntimeContext().getAggregatingMergeState(new AggregatingMergeStateDescriptor<>(
                 "avg-price",
                 new AvgAggregateFunction(),
-                DoubleSerializer.INSTANCE,
                 TypeInformation.of(new TypeHint<AvgAccumulator>() {})));
-/*
-        // ReducingMergeState for minimum – backed by RocksDBReducingMergeState
-        minPriceState = keyedStateBackend.getPartitionedState(
-                VoidNamespace.INSTANCE,
-                VoidNamespaceSerializer.INSTANCE,
-                new ReducingMergeStateDescriptor<>("min-price", Math::min, DoubleSerializer.INSTANCE));
-
-        // ReducingMergeState for maximum – backed by RocksDBReducingMergeState
-        maxPriceState = keyedStateBackend.getPartitionedState(
-                VoidNamespace.INSTANCE,
-                VoidNamespaceSerializer.INSTANCE,
-                new ReducingMergeStateDescriptor<>("max-price", Math::max, DoubleSerializer.INSTANCE));
-
-        // AggregatingMergeState for average – backed by RocksDBAggregatingMergeState.
-        // DoubleSerializer is the input (merge-operand) serializer; the accumulator type
-        // AvgAccumulator is resolved via TypeInformation for Flink POJO serialization.
-        avgPriceState = keyedStateBackend.getPartitionedState(
-                VoidNamespace.INSTANCE,
-                VoidNamespaceSerializer.INSTANCE,
-                new AggregatingMergeStateDescriptor<>(
-                        "avg-price",
-                        new AvgAggregateFunction(),
-                        DoubleSerializer.INSTANCE,
-                        TypeInformation.of(new TypeHint<AvgAccumulator>() {})));
-*/
 
         // Standard ReducingState for count – registered through the normal RuntimeContext API
         countState = getRuntimeContext().getReducingState(

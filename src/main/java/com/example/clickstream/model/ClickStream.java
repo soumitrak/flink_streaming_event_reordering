@@ -1,9 +1,7 @@
 package com.example.clickstream.model;
 
 import java.io.Serializable;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
+import java.time.LocalDate;
 
 /**
  * Represents a single clickstream event extracted from the raw Kafka message.
@@ -13,9 +11,8 @@ public class ClickStream implements Serializable, Comparable<ClickStream> {
 
     private static final long serialVersionUID = 1L;
 
-    // Format: dd/MM/yyyy HH:mm:ss.SSSSSS  (microseconds precision)
-    public static final DateTimeFormatter EVENT_TIME_FORMATTER =
-            DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss.SSSSSS");
+    // Format: dd/MM/yyyy HH:mm:ss.SSSSSS  (microseconds precision, exactly 26 chars)
+    private static final int EVENT_TIME_LEN = 26;
 
     private int userId;
     private String sessionId;
@@ -35,13 +32,61 @@ public class ClickStream implements Serializable, Comparable<ClickStream> {
         this.eventTimeMillis = parseEventTimeMillis(eventTime);
     }
 
+    /** Fast path used by {@link com.example.clickstream.function.ClickStreamParser}: skips the
+     *  timestamp parse when the caller has already computed {@code eventTimeMillis}. */
+    public ClickStream(int userId, String sessionId, String eventTime, String eventName,
+                       long eventTimeMillis) {
+        this.userId = userId;
+        this.sessionId = sessionId;
+        this.eventTime = eventTime;
+        this.eventName = eventName;
+        this.eventTimeMillis = eventTimeMillis;
+    }
+
     /**
-     * Parses the event time string into epoch milliseconds (UTC).
-     * The microsecond portion is truncated to milliseconds.
+     * Parses "dd/MM/yyyy HH:mm:ss.SSSSSS" into epoch milliseconds (UTC) by extracting
+     * each component directly from its fixed character position, avoiding
+     * {@link java.time.format.DateTimeFormatter} overhead. Microseconds are truncated
+     * to millisecond precision.
      */
     public static long parseEventTimeMillis(String eventTime) {
-        LocalDateTime ldt = LocalDateTime.parse(eventTime.trim(), EVENT_TIME_FORMATTER);
-        return ldt.toInstant(ZoneOffset.UTC).toEpochMilli();
+        String s = eventTime.trim();
+        if (s.length() != EVENT_TIME_LEN) {
+            throw new IllegalArgumentException("Unexpected event_time format: " + s);
+        }
+        int day    = twoDigit(s,  0);
+        int month  = twoDigit(s,  3);
+        int year   = fourDigit(s, 6);
+        int hour   = twoDigit(s, 11);
+        int minute = twoDigit(s, 14);
+        int second = twoDigit(s, 17);
+        int micros = sixDigit(s, 20);
+        long epochDay = LocalDate.of(year, month, day).toEpochDay();
+        return epochDay * 86_400_000L
+                + hour   *  3_600_000L
+                + minute *     60_000L
+                + second *      1_000L
+                + micros /      1_000L;
+    }
+
+    private static int twoDigit(String s, int i) {
+        return (s.charAt(i) - '0') * 10 + (s.charAt(i + 1) - '0');
+    }
+
+    private static int fourDigit(String s, int i) {
+        return (s.charAt(i)     - '0') * 1_000
+                + (s.charAt(i + 1) - '0') * 100
+                + (s.charAt(i + 2) - '0') * 10
+                + (s.charAt(i + 3) - '0');
+    }
+
+    private static int sixDigit(String s, int i) {
+        return (s.charAt(i)     - '0') * 100_000
+                + (s.charAt(i + 1) - '0') *  10_000
+                + (s.charAt(i + 2) - '0') *   1_000
+                + (s.charAt(i + 3) - '0') *     100
+                + (s.charAt(i + 4) - '0') *      10
+                + (s.charAt(i + 5) - '0');
     }
 
     @Override
