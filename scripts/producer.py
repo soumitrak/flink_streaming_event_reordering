@@ -196,8 +196,8 @@ def main():
         help="Maximum arrival delay in seconds for late events (default: 300)",
     )
     ap.add_argument(
-        "--send-interval", type=float, default=0.05,
-        help="Pause between consecutive Kafka sends in seconds (default: 0.05)",
+        "--send-interval", type=float, default=0,
+        help="Pause between consecutive Kafka sends in seconds (default: 0, no pause)",
     )
     args = ap.parse_args()
 
@@ -277,8 +277,8 @@ def main():
             print(f"  [WARN] Send failed: {exc}", file=sys.stderr)
             errors += 1
 
-        # Progress line every 10 events
-        if sent % 10 == 0 or sent == len(all_events):
+        # Progress line every 1000 events
+        if sent % 1000 == 0 or sent == len(all_events):
             print(
                 f"  [{sent:>4}/{len(all_events)}]"
                 f"  user={event['user_id']}"
