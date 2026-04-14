@@ -48,31 +48,6 @@ public class ClickStreamReorderUsingState
     /** State TTL – entries idle longer than this are garbage-collected. */
     private static final long STATE_TTL_MINUTES = ClickStreamReorderUsingHeap.STATE_TTL_MINUTES;
 
-    /** Maximum late arrival time. */
-    private static final long MAX_LATENESS_MS = ClickStreamReorderUsingHeap.MAX_LATENESS_MS;
-
-    /** The checkout-window width: a Checkout must occur within 1 minute of the window start. */
-    private static final long CHECKOUT_WINDOW_MS = ClickStreamReorderUsingHeap.CHECKOUT_WINDOW_MS;
-
-    /**
-     * The minimum span (maxEventTime − minEventTime) that must exist in the buffer
-     * before we are confident that the 1-minute checkout window is fully populated
-     * (accounts for 5-min late arrivals + 1-min window = 6 min).
-     */
-    private static final long TRIGGER_SPAN_MS = ClickStreamReorderUsingHeap.TRIGGER_SPAN_MS;
-
-    /**
-     * If no new event has been received for this long (wall-clock), flush the buffer
-     * regardless of the event-time span.
-     */
-    private static final long IDLE_FLUSH_MS = ClickStreamReorderUsingHeap.IDLE_FLUSH_MS;
-
-    /** Maximum number of events tracked in the sliding window leading to a Checkout. */
-    private static final int MAX_WINDOW_SIZE = ClickStreamReorderUsingHeap.MAX_WINDOW_SIZE;
-
-    /** Interval between processing-time timers. */
-    private static final long TIMER_INTERVAL_MS = ClickStreamReorderUsingHeap.TIMER_INTERVAL_MS;
-
     /** Comparator that orders {@link ClickStream} events by ascending event-time. */
     private static final Comparator<ClickStream> BY_EVENT_TIME = ClickStreamReorderUsingHeap.BY_EVENT_TIME;
     // ------------------------------------------------------------------ state descriptors
@@ -155,7 +130,7 @@ public class ClickStreamReorderUsingState
 
         // ---- insert event into the sorted buffer ----
         ClickStreamReorderUsingHeap.insertSorted(buffer, event);
-        LOG.info("SK: Buffer length={} key={}", buffer.size(), currentKey);
+        // LOG.info("SK: Buffer length={} key={}", buffer.size(), currentKey);
 
         // ---- persist updated state before calling process() ----
         bufferState.update(buffer);
@@ -187,8 +162,9 @@ public class ClickStreamReorderUsingState
         // ---- run the core processing logic ----
         ArrayList<ClickStream> buffer = bufferState.value();
         int before = buffer == null ? -1 : buffer.size();
-        ClickStreamReorderUsingHeap.process(maxEventTimeReceivedState.value(), buffer, out);
+        ClickStreamReorderUsingHeap.process(maxEventTimeReceivedState.value(), currentKey, buffer, out);
         if (buffer != null && !buffer.isEmpty() && before != buffer.size()) {
+            LOG.info("SK: setAcc buffer size: {} for key: {}", buffer.size(), currentKey);
             bufferState.update(buffer);
         }
 

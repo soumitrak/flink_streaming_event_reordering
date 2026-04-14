@@ -16,7 +16,7 @@
         <maven.compiler.source>11</maven.compiler.source>
         <maven.compiler.target>11</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <flink.version>2.2.0</flink.version>
+        <flink.version>2.3-SK</flink.version>
         <kafka.connector.version>4.0.1-2.0</kafka.connector.version>
         <jackson.version>2.15.2</jackson.version>
         <slf4j.version>1.7.36</slf4j.version>
@@ -42,6 +42,14 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-kafka</artifactId>
             <version>${kafka.connector.version}</version>
+        </dependency>
+
+        <!-- flink-connector-base: provides DeliveryGuarantee (provided by Flink runtime, needed at compile time) -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-base</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
         </dependency>
 
         <!-- RocksDB state backend (shaded into the fat JAR so the cluster does not need it pre-installed) -->

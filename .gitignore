@@ -33,3 +33,4 @@ flink-checkpoints/
 # Environment files (never commit secrets)
 .env
 .env.*
+.savepoint-path

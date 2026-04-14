@@ -86,7 +86,8 @@ KAFKA_EXEC      := podman exec clickstream-kafka $(KAFKA_BIN)
         venv produce consume consume-price-stats \
         submit-job list-jobs cancel-jobs savepoint-stop restart-from-savepoint \
         logs-jm logs-tm status clean \
-        shell-kafka shell-kafka-ui shell-jm shell-tm
+        shell-kafka shell-kafka-ui shell-jm shell-tm \
+        stop-flink
 
 # ---------------------------------------------------------------------------
 # Default target – print usage
@@ -100,6 +101,7 @@ help:
 	@printf '  make up                     Start all containers (podman-compose up)\n'
 	@printf '  make down                   Stop containers (keep volumes)\n'
 	@printf '  make teardown               Stop containers + wipe all volumes\n'
+	@printf '  make stop-flink             Stop and prune Flink jobmanager + taskmanager\n'
 	@printf '  make status                 Show running container status\n\n'
 	@printf '\033[4mKafka\033[0m\n'
 	@printf '  make create-topics          Create input/output Kafka topics\n'
@@ -146,8 +148,6 @@ build:
 ## Start all containers in the background.
 up:
 	@printf '\n==> Starting containers …\n'
-	-podman container stop $$(podman ps -q)
-	podman container prune -f
 	$(COMPOSE) up -d
 	@printf '\n==> Containers started. Kafka UI: http://localhost:8080  Flink UI: $(FLINK_REST)\n'
 
@@ -167,7 +167,7 @@ setup: up wait-for-kafka create-topics wait-for-flink
 	@printf '    Next step : make build && make submit-job && make produce\n\n'
 
 ## Stop containers and delete all named volumes (full reset).
-teardown:
+teardown: down
 	@printf '\n==> Tearing down stack and removing volumes …\n'
 	$(COMPOSE) down -v
 	@printf 'Done.\n'
@@ -266,6 +266,12 @@ produce: $(VENV_MARKER)
 		--late-ratio         $(LATE_RATIO) \
 		--max-late-secs      $(MAX_LATE_SECS)
 
+bp: $(VENV_MARKER)
+	@printf '\n==> Producing events to [$(INPUT_TOPIC)] on $(HOST_KAFKA) in batches …\n\n'
+	$(VENV_BIN)/python scripts/batch_producer.py \
+		--bootstrap-servers  $(HOST_KAFKA) \
+		--topic              $(INPUT_TOPIC) \
+
 # ---------------------------------------------------------------------------
 # Output consumption
 # ---------------------------------------------------------------------------
@@ -302,7 +308,7 @@ consume-price-stats:
 
 ## Upload the fat JAR to Flink and start the job.
 ## The job reads Kafka config from env vars set in podman-compose.yml.
-submit-job: $(JAR)
+submit-job: $(JAR) cancel-jobs
 	@printf '\n==> Uploading $(JAR) to Flink REST API …\n'
 	@JAR_ID=$$(curl -sf -X POST -H "Expect:" \
 		-F "jarfile=@$(JAR)" \
@@ -314,7 +320,7 @@ submit-job: $(JAR)
 	&& JOB_RESPONSE=$$(curl -sf -X POST \
 		"$(FLINK_REST)/jars/$$JAR_ID/run" \
 		-H "Content-Type: application/json" \
-		-d "{\"entryClass\":\"com.example.clickstream.ClickStreamJob\",\"parallelism\":2}") \
+		-d "{\"entryClass\":\"com.example.clickstream.ClickStreamJob\",\"parallelism\":1}") \
 	&& printf '==> Job response  : %s\n' "$$JOB_RESPONSE" \
 	&& printf '\n==> Job submitted! Watch progress at $(FLINK_REST)\n'
 
@@ -416,6 +422,19 @@ restart-from-savepoint: $(JAR)
 # ---------------------------------------------------------------------------
 # Logs
 # ---------------------------------------------------------------------------
+
+## Stop and prune only the Flink JobManager and TaskManager containers.
+stop-flink:
+	@printf '\n==> Stopping Flink containers …\n'
+	-$(COMPOSE) stop taskmanager jobmanager
+	-podman rm clickstream-taskmanager
+	-podman rm clickstream-jobmanager
+	@printf 'Done.\n'
+
+start-flink:
+	@printf '\n==> Starting Flink containers …\n'
+	-$(COMPOSE) up -d jobmanager taskmanager
+	@printf 'Done.\n'
 
 ## Tail Flink JobManager logs.
 logs-jm:

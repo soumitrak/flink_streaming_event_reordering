@@ -75,10 +75,10 @@ public class ClickStreamJob {
                 // ---- throughput tuning ----
                 .setProperty("fetch.min.bytes",           "65536")
                 .setProperty("fetch.max.wait.ms",         "500")
-                .setProperty("max.partition.fetch.bytes", "4194304")
-                .setProperty("fetch.max.bytes",           "67108864")
+                .setProperty("max.partition.fetch.bytes", "4194304") // 4M
+                .setProperty("fetch.max.bytes",           "4194304") // 4M
                 .setProperty("max.poll.records",          "2000")
-                .setProperty("receive.buffer.bytes",      "4194304")
+                .setProperty("receive.buffer.bytes",      "4194304") // 4M
                 .build();
 
         // We use WatermarkStrategy.noWatermarks() because the KeyedProcessFunction

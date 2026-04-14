@@ -74,7 +74,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       # Sensible defaults for a dev broker
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      KAFKA_LOG_RETENTION_HOURS: "2"
+      KAFKA_LOG_RETENTION_HOURS: "24"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
@@ -117,14 +117,15 @@ services:
       - "8081:8081"
     environment:
       # Flink configuration (written to flink-conf.yaml by the entrypoint)
-      # state.checkpoints.dir is intentionally omitted for local dev so that
-      # Flink uses JobManagerCheckpointStorage (in-memory) and avoids
-      # directory-permission issues with Docker named volumes.
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         jobmanager.rpc.port: 6123
         jobmanager.memory.process.size: 1600m
         parallelism.default: 2
+        state.backend.type: rocksdb
+        state.backend.incremental: true
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 600000
         state.backend.rocksdb.metrics.cur-size-active-mem-table: true
         state.backend.rocksdb.metrics.cur-size-all-mem-tables: true
         state.backend.rocksdb.metrics.size-all-mem-tables: true
@@ -146,6 +147,7 @@ services:
         state.backend.rocksdb.metrics.block-cache-pinned-usage: true
         state.backend.rocksdb.metrics.column-family-as-variable: true
         rest.flamegraph.enabled: true
+        state.backend.rocksdb.options-factory: com.example.clickstream.AggressiveCompactionOptions
       # Application-level env vars read by ClickStreamJob via System.getenv()
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_INPUT_TOPIC: "clickstream"
@@ -164,8 +166,16 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         jobmanager.rpc.port: 6123
-        taskmanager.memory.process.size: 1728m
+        taskmanager.memory.process.size: 16g
+        taskmanager.memory.task.heap.size: 2g
         taskmanager.numberOfTaskSlots: 4
+        state.backend.type: rocksdb
+        state.backend.incremental: true
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 120000
+        state.backend.rocksdb.writebuffer.count: 10
+        state.backend.rocksdb.writebuffer.number-to-merge: 2
+        state.backend.rocksdb.writebuffer.size: 16777216
         state.backend.rocksdb.metrics.cur-size-active-mem-table: true
         state.backend.rocksdb.metrics.cur-size-all-mem-tables: true
         state.backend.rocksdb.metrics.size-all-mem-tables: true
@@ -191,6 +201,7 @@ services:
         state.backend.rocksdb.log.dir: /tmp/flink-rocksdb-logs
         state.backend.rocksdb.log.max-file-size: 67108864
         state.backend.rocksdb.log.file-num: 4
+        state.backend.rocksdb.options-factory: com.example.clickstream.AggressiveCompactionOptions
       # Same app-level vars needed because user code runs on the TaskManager JVM
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_INPUT_TOPIC: "clickstream"

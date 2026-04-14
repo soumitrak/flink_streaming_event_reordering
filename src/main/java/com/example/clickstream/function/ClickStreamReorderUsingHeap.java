@@ -147,7 +147,7 @@ public class ClickStreamReorderUsingHeap
 
         // ---- insert event into the sorted buffer ----
         insertSorted(buffer, event);
-        LOG.info("SK: Buffer length={} key={}", buffer.size(), currentKey);
+        // LOG.info("SK: Buffer length={} key={}", buffer.size(), currentKey);
 
         // ---- persist updated state before calling process() ----
         maxEventTimeReceivedState.update(maxETR);
@@ -177,7 +177,7 @@ public class ClickStreamReorderUsingHeap
         currentTimerState.clear();
 
         // ---- run the core processing logic ----
-        process(maxEventTimeReceivedState.value(), buffer, out);
+        process(maxEventTimeReceivedState.value(), currentKey, buffer, out);
 
         // ---- decide whether to re-schedule or clean up ----
         if (buffer == null || buffer.isEmpty()) {
@@ -207,8 +207,9 @@ public class ClickStreamReorderUsingHeap
      * than {@value #IDLE_FLUSH_MS} ms we perform a best-effort scan to find any Checkout
      * in the remaining buffer, emit it if found, and then discard all remaining events.
      */
-    static void process(Long maxETR, ArrayList<ClickStream> buffer, Collector<CheckoutSession> out) throws Exception {
+    static void process(Long maxETR, String currentKey, ArrayList<ClickStream> buffer, Collector<CheckoutSession> out) throws Exception {
         if (buffer == null || buffer.isEmpty()) return;
+        LOG.info("SK: buffer size: {} for key: {}", buffer.size(), currentKey);
 
         // minET and maxET are derived directly from the sorted buffer.
         long minET = buffer.get(0).getEventTimeMillis();
@@ -245,8 +246,8 @@ public class ClickStreamReorderUsingHeap
                     && checkoutEvent.getEventTimeMillis() < minET + CHECKOUT_WINDOW_MS) {
 
                 CheckoutSession session = buildSession(new ArrayList<>(window));
-                LOG.info("Emitting checkout session: userId={}, sessionId={}, events={}",
-                        session.getUserId(), session.getSessionId(), session.getEventNames());
+                //LOG.info("Emitting checkout session: userId={}, sessionId={}, events={}",
+                //        session.getUserId(), session.getSessionId(), session.getEventNames());
                 out.collect(session);
 
                 // Remove the processed prefix (inclusive of the Checkout event).

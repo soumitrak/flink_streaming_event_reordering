@@ -47,30 +47,6 @@ public class ClickStreamReorderUsingMergeState
     /** State TTL – entries idle longer than this are garbage-collected. */
     private static final long STATE_TTL_MINUTES = ClickStreamReorderUsingHeap.STATE_TTL_MINUTES;
 
-    /** Maximum late arrival time. */
-    private static final long MAX_LATENESS_MS = ClickStreamReorderUsingHeap.MAX_LATENESS_MS;
-
-    /** The checkout-window width: a Checkout must occur within 1 minute of the window start. */
-    private static final long CHECKOUT_WINDOW_MS = ClickStreamReorderUsingHeap.CHECKOUT_WINDOW_MS;
-
-    /**
-     * The minimum span (maxEventTime − minEventTime) that must exist in the buffer
-     * before we are confident that the 1-minute checkout window is fully populated
-     * (accounts for 5-min late arrivals + 1-min window = 6 min).
-     */
-    private static final long TRIGGER_SPAN_MS = ClickStreamReorderUsingHeap.TRIGGER_SPAN_MS;
-
-    /**
-     * If no new event has been received for this long (wall-clock), flush the buffer
-     * regardless of the event-time span.
-     */
-    private static final long IDLE_FLUSH_MS = ClickStreamReorderUsingHeap.IDLE_FLUSH_MS;
-
-    /** Maximum number of events tracked in the sliding window leading to a Checkout. */
-    private static final int MAX_WINDOW_SIZE = ClickStreamReorderUsingHeap.MAX_WINDOW_SIZE;
-
-    /** Interval between processing-time timers. */
-    private static final long TIMER_INTERVAL_MS = ClickStreamReorderUsingHeap.TIMER_INTERVAL_MS;
 
     /** Comparator that orders {@link ClickStream} events by ascending event-time. */
     private static final Comparator<ClickStream> BY_EVENT_TIME = ClickStreamReorderUsingHeap.BY_EVENT_TIME;
@@ -98,7 +74,7 @@ public class ClickStreamReorderUsingMergeState
     /**
      * Number of events currently stored in {@code bufferState}.
      * Kept in sync with every insertion and removal so that empty/non-empty decisions
-     * can be made without deserialising the full buffer via {@code bufferState.get()}.
+     * can be made without deserializing the full buffer via {@code bufferState.get()}.
      */
     private ValueState<Long> numBufferedEventsState;
 
@@ -165,7 +141,7 @@ public class ClickStreamReorderUsingMergeState
         long now = System.currentTimeMillis();
 
         if (numBuffered == null || numBuffered == 0L) {
-            bufferState.set(new SortedListAccumulator());
+            bufferState.setAcc(new SortedListAccumulator());
             LOG.info("SK: Buffer CREATED key={}", currentKey);
             numBuffered = 0L;
             // First event in the buffer is by definition the new maximum.
@@ -194,7 +170,8 @@ public class ClickStreamReorderUsingMergeState
         numBuffered = numBufferedEventsState.value();
         if (numBuffered == null || numBuffered == 0L) {
             clearAllState(ctx);
-        } else {
+        } else if (currentTimerState.value() == null) {
+            // Set timer the first time, the ongoing should be set from onTimer method.
             ClickStreamReorderUsingHeap.rescheduleTimer(ctx, currentTimerState, now);
         }
     }
@@ -214,16 +191,17 @@ public class ClickStreamReorderUsingMergeState
         long st = System.nanoTime();
         ArrayList<ClickStream> buffer = bufferState.get();
         long tt = System.nanoTime() - st;
-        LOG.info("SK: Time taken in get call: {}", tt);
+        LOG.info("SK: Time taken in get call: {} ms size: {} for key: {}", tt/1000000.0, buffer.size(), currentKey);
         int before = buffer == null ? -1 : buffer.size();
-        ClickStreamReorderUsingHeap.process(maxEventTimeReceivedState.value(), buffer, out);
+        ClickStreamReorderUsingHeap.process(maxEventTimeReceivedState.value(), currentKey, buffer, out);
         if (buffer != null && !buffer.isEmpty()) {
             // Setting it irrespective of change to save the cost of merge in next get call
-            bufferState.set(new SortedListAccumulator(buffer));
+            LOG.info("SK: setAcc buffer size: {} for key: {}", buffer.size(), currentKey);
+            bufferState.setAcc(new SortedListAccumulator(buffer));
         }
         if (buffer != null && !buffer.isEmpty() && before != buffer.size()) {
             // SK: Set is always in onTimer to save the cost of merge in next get call
-            // bufferState.set(new SortedListAccumulator(buffer));
+            // bufferState.setAcc(new SortedListAccumulator(buffer));
             numBufferedEventsState.update((long) buffer.size());
             maxEventTimeState.update(buffer.get(buffer.size() - 1).getEventTimeMillis());
         }
@@ -234,152 +212,6 @@ public class ClickStreamReorderUsingMergeState
         } else if (currentTimerState.value() == null) {
             // Set timer the first time, the ongoing should be set from onTimer method.
             ClickStreamReorderUsingHeap.rescheduleTimer(ctx, currentTimerState, System.currentTimeMillis());
-        }
-    }
-
-    // ------------------------------------------------------------------ process (core logic)
-
-    /**
-     * Core reordering and session-detection logic.
-     *
-     * <p><b>Part 1 – event-time driven flush:</b> While the buffer spans more than
-     * {@value #TRIGGER_SPAN_MS} ms (6 minutes) the 1-minute checkout window is stable
-     * enough to act on.  We scan left-to-right maintaining a sliding window of the last
-     * {@value #MAX_WINDOW_SIZE} events.  When we encounter a "Checkout" event whose
-     * event-time falls within 1 minute of the current {@code minEventTime} we emit a
-     * {@link CheckoutSession} and remove the processed prefix from the buffer.
-     * When no qualifying Checkout is found, the first event (at {@code minET}) is dropped
-     * because it is fully settled and can never join a future checkout window; this keeps
-     * the buffer bounded to at most {@value #TRIGGER_SPAN_MS} ms of event-time regardless
-     * of how fast events arrive (fixing the high-throughput historical-replay memory issue).
-     *
-     * <p><b>Part 2 – idle/wall-clock driven flush:</b> If the key has been idle for more
-     * than {@value #IDLE_FLUSH_MS} ms we perform a best-effort scan to find any Checkout
-     * in the remaining buffer, emit it if found, and then discard all remaining events.
-     */
-    private void process(Collector<CheckoutSession> out) throws Exception {
-        ArrayList<ClickStream> buffer = bufferState.get();
-        if (buffer == null || buffer.isEmpty()) return;
-
-        Long maxETR = maxEventTimeReceivedState.value();
-
-        // minET and maxET are derived directly from the sorted buffer.
-        long minET = buffer.get(0).getEventTimeMillis();
-        long maxET = buffer.get(buffer.size() - 1).getEventTimeMillis();
-
-        // ========================= Part 1 =========================
-        // Keep flushing while the buffer spans > 6 minutes (meaning the first minute
-        // of the window has been fully received, accounting for late arrivals).
-        while (!buffer.isEmpty() && (maxET - minET) > TRIGGER_SPAN_MS) {
-
-            // Slide a fixed-size window of MAX_WINDOW_SIZE across the buffer.
-            // Stop as soon as a Checkout event is encountered.
-            Deque<ClickStream> window = new ArrayDeque<>(MAX_WINDOW_SIZE);
-            int checkoutIdx = -1;
-            ClickStream checkoutEvent = null;
-
-            for (int i = 0; i < buffer.size(); i++) {
-                ClickStream e = buffer.get(i);
-                if (window.size() >= MAX_WINDOW_SIZE) {
-                    window.poll();  // evict the oldest to keep size ≤ MAX_WINDOW_SIZE
-                }
-                window.offer(e);
-                if ("Checkout".equals(e.getEventName())) {
-                    checkoutEvent = e;
-                    checkoutIdx = i;
-                    break;
-                }
-            }
-
-            // Only emit when:
-            //   (a) a Checkout was found in the scan, AND
-            //   (b) the Checkout happened within the 1-minute checkout window.
-            if (checkoutEvent != null
-                    && checkoutEvent.getEventTimeMillis() < minET + CHECKOUT_WINDOW_MS) {
-
-                CheckoutSession session = buildSession(new ArrayList<>(window));
-                LOG.info("Emitting checkout session: userId={}, sessionId={}, events={}",
-                        session.getUserId(), session.getSessionId(), session.getEventNames());
-                out.collect(session);
-
-                // Remove the processed prefix (inclusive of the Checkout event).
-                buffer.subList(0, checkoutIdx + 1).clear();
-
-                // Update minEventTime / maxEventTime / maxEventTimeReceived to
-                // reflect the remaining buffer contents.
-                if (!buffer.isEmpty()) {
-                    // buffer is sorted: first element has min time, last has max time.
-                    // maxETR is unchanged – the last element (max event-time) is the same.
-                    minET = buffer.get(0).getEventTimeMillis();
-                    maxET = buffer.get(buffer.size() - 1).getEventTimeMillis();
-                } else {
-                    // Buffer is now empty – clear wall-clock tracking state.
-                    maxEventTimeReceivedState.clear();
-                    break;
-                }
-
-            } else {
-                // The first event in the buffer (at minET) is confirmed settled: the
-                // 6-minute span guarantees no late arrival can still affect its window.
-                // Either no Checkout exists within 1 minute of minET, or the first
-                // Checkout found is too far in the future.  Either way, buffer.get(0)
-                // can never be part of a qualifying session – drop it and advance minET.
-                buffer.remove(0);
-                if (buffer.isEmpty()) break;
-                minET = buffer.get(0).getEventTimeMillis();
-                maxET = buffer.get(buffer.size() - 1).getEventTimeMillis();
-            }
-        }
-
-        // Persist the (potentially trimmed) buffer and sync the counters.
-        LOG.info("SK: list size={} key={}", buffer.size(), currentKey);
-        bufferState.set(new SortedListAccumulator(buffer));
-        numBufferedEventsState.update((long) buffer.size());
-        if (buffer.isEmpty()) {
-            maxEventTimeState.clear();
-        } else {
-            maxEventTimeState.update(buffer.get(buffer.size() - 1).getEventTimeMillis());
-        }
-
-        // ========================= Part 2 =========================
-        // If no new event has arrived for IDLE_FLUSH_MS ms, perform a best-effort flush.
-        if (!buffer.isEmpty()
-                && maxETR != null
-                && maxETR < System.currentTimeMillis() - IDLE_FLUSH_MS) {
-
-            LOG.info("Key has been idle for > {} ms – performing best-effort flush. " +
-                     "Buffer size: {}", IDLE_FLUSH_MS, buffer.size());
-
-            Deque<ClickStream> window = new ArrayDeque<>(MAX_WINDOW_SIZE);
-            ClickStream checkoutEvent = null;
-
-            for (ClickStream e : buffer) {
-                if (window.size() >= MAX_WINDOW_SIZE) {
-                    window.poll();
-                }
-                window.offer(e);
-                if ("Checkout".equals(e.getEventName())) {
-                    checkoutEvent = e;
-                    break;
-                }
-            }
-
-            if (checkoutEvent != null) {
-                CheckoutSession session = buildSession(new ArrayList<>(window));
-                LOG.info("Emitting checkout session (idle flush): userId={}, sessionId={}",
-                        session.getUserId(), session.getSessionId());
-                out.collect(session);
-            } else {
-                LOG.info("No Checkout found during idle flush – discarding buffer.");
-            }
-
-            // Discard everything regardless of whether we emitted.
-            // buffer.clear();
-            LOG.info("SK: Setting empty list key={}", currentKey);
-            bufferState.set(new SortedListAccumulator());
-            numBufferedEventsState.update(0L);
-            maxEventTimeState.clear();
-            maxEventTimeReceivedState.clear();
         }
     }
 
@@ -395,34 +227,6 @@ public class ClickStreamReorderUsingMergeState
         // when a match exists, insert just after it to preserve arrival order among ties.
         int insertionPoint = (idx >= 0) ? idx + 1 : -(idx + 1);
         buffer.add(insertionPoint, event);
-    }
-
-    /**
-     * Builds a {@link CheckoutSession} from the ordered list of events in the window.
-     * The first event provides start_time/user_id/session_id; the last event (Checkout)
-     * provides end_time.
-     */
-    private CheckoutSession buildSession(List<ClickStream> events) {
-        ClickStream first   = events.get(0);
-        ClickStream last    = events.get(events.size() - 1);   // Checkout event
-
-        long durationSeconds =
-                (last.getEventTimeMillis() - first.getEventTimeMillis()) / 1_000L;
-
-        List<String> eventNames = events.stream()
-                .map(ClickStream::getEventName)
-                .collect(Collectors.toList());
-
-        CheckoutSession session = new CheckoutSession(
-                first.getUserId(),
-                first.getSessionId(),
-                first.getEventTime(),
-                last.getEventTime(),
-                durationSeconds,
-                eventNames);
-        // last event is the Checkout event; carry its price (may be null) into the session.
-        session.setPrice(last.getPrice());
-        return session;
     }
 
     /**

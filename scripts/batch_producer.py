@@ -190,16 +190,16 @@ def main():
         help="Destination Kafka topic (default: clickstream)",
     )
     ap.add_argument(
-        "--start-before", type=float, default=1.0,
-        help="How many hours in the past the first window starts (default: 1)",
+        "--start-before", type=float, default=5.0,
+        help="How many hours in the past the first window starts (default: 5)",
     )
     ap.add_argument(
         "--window-size", type=int, default=60,
         help="Tumbling window duration in seconds (default: 60)",
     )
     ap.add_argument(
-        "--batch-size", type=int, default=1000,
-        help="Number of events to produce per window (default: 1000)",
+        "--batch-size", type=int, default=7000,
+        help="Number of events to produce per window (default: 7000)",
     )
     ap.add_argument(
         "--num-users", type=int, default=5,
@@ -222,8 +222,8 @@ def main():
         help="Pause between consecutive Kafka sends in seconds (default: 0)",
     )
     ap.add_argument(
-        "--inter-batch-delay", type=float, default=0.0,
-        help="Pause between finishing one batch and starting the next, in seconds (default: 0)",
+        "--inter-batch-delay", type=float, default=5.0,
+        help="Pause between finishing one batch and starting the next, in seconds (default: 5)",
     )
     args = ap.parse_args()
 
