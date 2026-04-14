@@ -27,12 +27,18 @@ import java.util.Properties;
  *
  * <p>Pipeline:
  * <pre>
- *  Kafka (clickstream)
- *      → parse &amp; filter (ClickStreamParser)
- *      → keyBy (user_id + "_" + session_id)
- *      → KeyedProcessFunction (ClickStreamProcessFunction)  ← reorder + detect checkout
- *      → serialize to JSON string
- *      → Kafka (checkout-session)
+ *  kafka-source-clickstream      Kafka (clickstream) → raw JSON strings
+ *      → parse-and-filter        ClickStreamParser: JSON → ClickStream POJOs, drops invalids
+ *      → keyBy(user_id)
+ *      → reorder-and-detect-checkout  ClickStreamReorderUsingMergeState: buffer + detect checkout
+ *      → serialize-checkout-session   CheckoutSessionSerializer: CheckoutSession → JSON
+ *      → kafka-sink-checkout-session  Kafka (checkout-session)
+ *
+ *  (from reorder-and-detect-checkout)
+ *      → keyBy("global")
+ *      → price-stats-5min-window  PriceStatsWindowFunction: 5-min tumbling aggregation
+ *      → serialize-price-stats    PriceStatsSerializer: PriceStats → JSON
+ *      → kafka-sink-price-stats   Kafka (price-stats)
  * </pre>
  *
  * <p>Configuration is read from the following environment variables (with defaults
@@ -86,13 +92,15 @@ public class ClickStreamJob {
         DataStream<String> rawStream = env.fromSource(
                 kafkaSource,
                 WatermarkStrategy.noWatermarks(),
-                "Kafka-clickstream-source");
+                "kafka-source-clickstream")
+                .uid("kafka-source-clickstream");
 
         // ------------------------------------------------------------------ pipeline
         DataStream<ClickStream> clickStream = rawStream
                 // Parse JSON → ClickStream (invalid records are silently dropped)
                 .flatMap(new ClickStreamParser())
-                .name("parse-and-filter");
+                .name("parse-and-filter")
+                .uid("parse-and-filter");
 
         if (true) {
             DataStream<CheckoutSession> checkoutStream = clickStream
@@ -100,7 +108,8 @@ public class ClickStreamJob {
                     .keyBy(cs -> "" + cs.getUserId()) // + "_" + cs.getSessionId())
                     // Reorder events and detect checkout sequences.
                     .process(new ClickStreamReorderUsingMergeState())
-                    .name("reorder-and-detect-checkout");
+                    .name("reorder-and-detect-checkout")
+                    .uid("reorder-and-detect-checkout");
 
             // ------------------------------------------------------------------ Kafka sink
             Properties producerProps = new Properties();
@@ -121,9 +130,11 @@ public class ClickStreamJob {
 
             checkoutStream
                     .map(new CheckoutSessionSerializer())
-                    .name("serialize-to-json")
+                    .name("serialize-checkout-session")
+                    .uid("serialize-checkout-session")
                     .sinkTo(kafkaSink)
-                    .name("Kafka-checkout-session-sink");
+                    .name("kafka-sink-checkout-session")
+                    .uid("kafka-sink-checkout-session");
 
             // ------------------------------------------------------------------ price-stats sink
             KafkaSink<String> priceStatsSink = KafkaSink.<String>builder()
@@ -145,15 +156,19 @@ public class ClickStreamJob {
                     .keyBy(session -> "global")
                     .process(new PriceStatsWindowFunction())
                     .name("price-stats-5min-window")
+                    .uid("price-stats-5min-window")
                     .map(new PriceStatsSerializer())
                     .name("serialize-price-stats")
+                    .uid("serialize-price-stats")
                     .sinkTo(priceStatsSink)
-                    .name("Kafka-price-stats-sink");
+                    .name("kafka-sink-price-stats")
+                    .uid("kafka-sink-price-stats");
         } else {
             // Discard parsed events to measure raw Kafka → parse throughput in isolation.
             clickStream
                     .sinkTo(new DiscardingSink<>())
-                    .name("discard-clickstream");
+                    .name("discard-clickstream")
+                    .uid("discard-clickstream");
         }
         // ------------------------------------------------------------------ execute
         env.execute("Flink Clickstream Event Reordering");
