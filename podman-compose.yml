@@ -176,7 +176,7 @@ services:
         state.backend.type: rocksdb
         state.backend.incremental: true
         state.checkpoints.dir: file:///tmp/flink-checkpoints
-        execution.checkpointing.interval: 120000
+        execution.checkpointing.interval: 600000
         state.backend.rocksdb.writebuffer.count: 10
         state.backend.rocksdb.writebuffer.number-to-merge: 2
         state.backend.rocksdb.writebuffer.size: 16777216

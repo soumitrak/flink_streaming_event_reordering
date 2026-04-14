@@ -589,6 +589,43 @@
     },
 
     {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Kafka Source – Records Lag Max",
+      "description": "Maximum consumer lag (in records) seen across all assigned partitions for the Kafka source operator. A growing lag means the job is falling behind the producer.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10000 },
+              { "color": "red", "value": 100000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "flink_taskmanager_job_task_operator_KafkaSourceReader_KafkaConsumer_records_lag_max{job_name=~\"$job_name\"}",
+          "legendFormat": "{{operator_name}} / {{subtask_index}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 }
+    },
+
+    {
       "id": 20,
       "type": "timeseries",
       "title": "Backpressure (1 = fully back-pressured)",
@@ -623,7 +660,7 @@
           "refId": "A"
         }
       ],
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 45 }
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 45 }
     },
 
     {
