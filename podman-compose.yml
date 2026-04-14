@@ -27,6 +27,8 @@ networks:
 
 volumes:
   kafka-data:
+  prometheus-data:
+  grafana-data:
 
 # ---------------------------------------------------------------------------
 # Re-usable YAML anchors
@@ -148,6 +150,8 @@ services:
         state.backend.rocksdb.metrics.column-family-as-variable: true
         rest.flamegraph.enabled: true
         state.backend.rocksdb.options-factory: com.example.clickstream.AggressiveCompactionOptions
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
       # Application-level env vars read by ClickStreamJob via System.getenv()
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_INPUT_TOPIC: "clickstream"
@@ -202,6 +206,8 @@ services:
         state.backend.rocksdb.log.max-file-size: 67108864
         state.backend.rocksdb.log.file-num: 4
         state.backend.rocksdb.options-factory: com.example.clickstream.AggressiveCompactionOptions
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
       # Same app-level vars needed because user code runs on the TaskManager JVM
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_INPUT_TOPIC: "clickstream"
@@ -209,3 +215,62 @@ services:
       KAFKA_CONSUMER_GROUP: "clickstream-reordering"
     depends_on:
       - jobmanager
+
+  # ---------- Kafka Exporter (topic / consumer-group lag metrics for Prometheus) ----------
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    platform: ${PLATFORM:-linux/amd64}
+    container_name: clickstream-kafka-exporter
+    hostname: kafka-exporter
+    networks:
+      - clickstream-net
+    command:
+      - --kafka.server=kafka:9092
+      - --kafka.version=3.0.0
+    depends_on:
+      - kafka
+
+  # ---------- Prometheus ----------
+  prometheus:
+    image: prom/prometheus:latest
+    platform: ${PLATFORM:-linux/amd64}
+    container_name: clickstream-prometheus
+    hostname: prometheus
+    networks:
+      - clickstream-net
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    depends_on:
+      - kafka-exporter
+      - jobmanager
+      - taskmanager
+
+  # ---------- Grafana ----------
+  grafana:
+    image: grafana/grafana:latest
+    platform: ${PLATFORM:-linux/amd64}
+    container_name: clickstream-grafana
+    hostname: grafana
+    networks:
+      - clickstream-net
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus

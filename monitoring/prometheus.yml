@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Flink JobManager – exposes JVM, job-level, and checkpoint metrics
+  - job_name: flink-jobmanager
+    static_configs:
+      - targets: ["jobmanager:9249"]
+    metrics_path: /
+
+  # Flink TaskManager – exposes operator, RocksDB, and network metrics
+  - job_name: flink-taskmanager
+    static_configs:
+      - targets: ["taskmanager:9249"]
+    metrics_path: /
+
+  # Kafka broker metrics via kafka-exporter (topic offsets, consumer-group lag, etc.)
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
