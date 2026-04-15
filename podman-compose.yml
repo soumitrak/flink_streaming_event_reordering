@@ -143,6 +143,8 @@ services:
         state.backend.rocksdb.metrics.num-running-compactions: true
         state.backend.rocksdb.metrics.num-running-flushes: true
         state.backend.rocksdb.metrics.actual-delayed-write-rate: true
+        state.backend.rocksdb.metrics.is-write-stalled: true
+        state.backend.rocksdb.metrics.is-write-stopped: true
         state.backend.rocksdb.metrics.background-errors: true
         state.backend.rocksdb.metrics.block-cache-capacity: true
         state.backend.rocksdb.metrics.block-cache-usage: true
@@ -195,6 +197,8 @@ services:
         state.backend.rocksdb.metrics.num-running-compactions: true
         state.backend.rocksdb.metrics.num-running-flushes: true
         state.backend.rocksdb.metrics.actual-delayed-write-rate: true
+        state.backend.rocksdb.metrics.is-write-stalled: true
+        state.backend.rocksdb.metrics.is-write-stopped: true
         state.backend.rocksdb.metrics.background-errors: true
         state.backend.rocksdb.metrics.block-cache-capacity: true
         state.backend.rocksdb.metrics.block-cache-usage: true

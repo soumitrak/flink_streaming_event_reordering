@@ -770,19 +770,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "flink_taskmanager_job_task_operator_rocksdb_cur_size_active_mem_table{job_name=~\"$job_name\"}",
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_cur_size_active_mem_table{job_name=~\"$job_name\"}",
           "legendFormat": "Active – {{operator_name}} {{column_family}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "flink_taskmanager_job_task_operator_rocksdb_cur_size_all_mem_tables{job_name=~\"$job_name\"}",
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_cur_size_all_mem_tables{job_name=~\"$job_name\"}",
           "legendFormat": "All (incl. imm) – {{operator_name}} {{column_family}}",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "flink_taskmanager_job_task_operator_rocksdb_size_all_mem_tables{job_name=~\"$job_name\"}",
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_size_all_mem_tables{job_name=~\"$job_name\"}",
           "legendFormat": "Pinned – {{operator_name}} {{column_family}}",
           "refId": "C"
         }
@@ -810,25 +810,25 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "flink_taskmanager_job_task_operator_rocksdb_num_entries_active_mem_table{job_name=~\"$job_name\"}",
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_num_entries_active_mem_table{job_name=~\"$job_name\"}",
           "legendFormat": "Entries Active – {{operator_name}} {{column_family}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "flink_taskmanager_job_task_operator_rocksdb_num_entries_imm_mem_tables{job_name=~\"$job_name\"}",
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_num_entries_imm_mem_tables{job_name=~\"$job_name\"}",
           "legendFormat": "Entries Imm – {{operator_name}} {{column_family}}",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "flink_taskmanager_job_task_operator_rocksdb_num_deletes_active_mem_table{job_name=~\"$job_name\"}",
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_num_deletes_active_mem_table{job_name=~\"$job_name\"}",
           "legendFormat": "Deletes Active – {{operator_name}} {{column_family}}",
           "refId": "C"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "flink_taskmanager_job_task_operator_rocksdb_num_deletes_imm_mem_tables{job_name=~\"$job_name\"}",
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_num_deletes_imm_mem_tables{job_name=~\"$job_name\"}",
           "legendFormat": "Deletes Imm – {{operator_name}} {{column_family}}",
           "refId": "D"
         }
@@ -864,13 +864,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_rocksdb_estimate_num_keys{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_column_family_rocksdb_estimate_num_keys{job_name=~\"$job_name\"})",
           "legendFormat": "Keys – {{operator_name}} {{column_family}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_rocksdb_estimate_live_data_size{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_column_family_rocksdb_estimate_live_data_size{job_name=~\"$job_name\"})",
           "legendFormat": "Live Data Size – {{operator_name}} {{column_family}}",
           "refId": "B"
         }
@@ -907,13 +907,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_rocksdb_total_sst_files_size{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_column_family_rocksdb_total_sst_files_size{job_name=~\"$job_name\"})",
           "legendFormat": "Total SST – {{operator_name}} {{column_family}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_rocksdb_live_sst_files_size{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_column_family_rocksdb_live_sst_files_size{job_name=~\"$job_name\"})",
           "legendFormat": "Live SST – {{operator_name}} {{column_family}}",
           "refId": "B"
         }
@@ -950,7 +950,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_rocksdb_estimate_pending_compaction_bytes{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name, column_family) (flink_taskmanager_job_task_operator_column_family_rocksdb_estimate_pending_compaction_bytes{job_name=~\"$job_name\"})",
           "legendFormat": "{{operator_name}} {{column_family}}",
           "refId": "A"
         }
@@ -960,13 +960,14 @@
 
     {
       "id": 31,
-      "type": "stat",
+      "type": "timeseries",
       "title": "Running Compactions",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "color": { "mode": "thresholds" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -979,33 +980,30 @@
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto"
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
       },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum(flink_taskmanager_job_task_operator_rocksdb_num_running_compactions{job_name=~\"$job_name\"})",
+          "expr": "sum(flink_taskmanager_job_task_operator_column_family_rocksdb_num_running_compactions{job_name=~\"$job_name\"})",
           "legendFormat": "Compactions",
           "refId": "A"
         }
       ],
-      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 88 }
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 88 }
     },
 
     {
       "id": 32,
-      "type": "stat",
+      "type": "timeseries",
       "title": "Running Flushes",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "color": { "mode": "thresholds" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1018,22 +1016,18 @@
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto"
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
       },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum(flink_taskmanager_job_task_operator_rocksdb_num_running_flushes{job_name=~\"$job_name\"})",
+          "expr": "sum(flink_taskmanager_job_task_operator_column_family_rocksdb_num_running_flushes{job_name=~\"$job_name\"})",
           "legendFormat": "Flushes",
           "refId": "A"
         }
       ],
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 88 }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 88 }
     },
 
     {
@@ -1074,19 +1068,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_rocksdb_block_cache_capacity{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_column_family_rocksdb_block_cache_capacity{job_name=~\"$job_name\"})",
           "legendFormat": "Capacity – {{operator_name}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_rocksdb_block_cache_usage{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_column_family_rocksdb_block_cache_usage{job_name=~\"$job_name\"})",
           "legendFormat": "Used – {{operator_name}}",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_rocksdb_block_cache_pinned_usage{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_column_family_rocksdb_block_cache_pinned_usage{job_name=~\"$job_name\"})",
           "legendFormat": "Pinned – {{operator_name}}",
           "refId": "C"
         }
@@ -1122,7 +1116,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_rocksdb_actual_delayed_write_rate{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_column_family_rocksdb_actual_delayed_write_rate{job_name=~\"$job_name\"})",
           "legendFormat": "Delayed Write Rate – {{operator_name}}",
           "refId": "A"
         }
@@ -1158,12 +1152,88 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_rocksdb_background_errors{job_name=~\"$job_name\"})",
+          "expr": "sum by (operator_name) (flink_taskmanager_job_task_operator_column_family_rocksdb_background_errors{job_name=~\"$job_name\"})",
           "legendFormat": "Background Errors – {{operator_name}}",
           "refId": "A"
         }
       ],
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 101 }
+    },
+
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Write Stalled (1 = stalled)",
+      "description": "1 means RocksDB is throttling writes for this column family due to compaction pressure. Sustained stalls precede stopped writes.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "color": { "mode": "thresholds" },
+          "custom": { "lineWidth": 2, "fillOpacity": 25 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_is_write_stalled{job_name=~\"$job_name\"}",
+          "legendFormat": "{{operator_name}} / {{column_family}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 109 }
+    },
+
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Write Stopped (1 = stopped)",
+      "description": "1 means RocksDB has completely halted writes for this column family. This is the most severe write-stall condition and will block Flink state access.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "color": { "mode": "thresholds" },
+          "custom": { "lineWidth": 2, "fillOpacity": 25 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_is_write_stopped{job_name=~\"$job_name\"}",
+          "legendFormat": "{{operator_name}} / {{column_family}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 109 }
     }
 
   ]
