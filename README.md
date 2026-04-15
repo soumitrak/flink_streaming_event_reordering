@@ -10,6 +10,7 @@ A Apache Flink 2.2 streaming application that reads clickstream events from Kafk
 - [Architecture](#architecture)
 - [Event Schemas](#event-schemas)
 - [Processing Logic](#processing-logic)
+- [Reordering Processor Modes](#reordering-processor-modes)
 - [Price Aggregation — RocksDB MergeOperator Design](#price-aggregation--rocksdb-mergeoperator-design)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
@@ -56,8 +57,9 @@ Key constraints:
               .keyBy(userId + "_" + sessionId)
                             │
                             ▼
-              ClickStreamProcessFunction
-              (KeyedProcessFunction)
+              ClickStreamReorder*
+              (KeyedProcessFunction — one of three modes,
+               selected via --processor flag)
               • Sorted per-key event buffer
               • Part 1: event-time flush when span > 6 min
               • Part 2: wall-clock idle flush after 5 min
@@ -182,7 +184,7 @@ Windows containing no priced checkouts produce no output.
 
 ## Processing Logic
 
-The core operator is `ClickStreamProcessFunction`, a `KeyedProcessFunction` with the following design:
+The core operator is one of the three `ClickStreamReorder*` implementations (see [Reordering Processor Modes](#reordering-processor-modes)), each a `KeyedProcessFunction` sharing the following design:
 
 ### State
 
@@ -214,6 +216,66 @@ Part 2 handles sessions that never accumulate a 6-minute event-time span (e.g. a
 ### Why not use Flink's built-in windows?
 
 See [WINDOWING_ANALYSIS.md](WINDOWING_ANALYSIS.md) for a detailed comparison of tumbling, sliding, and session windows against the `KeyedProcessFunction` approach across interactivity, memory usage, events dropped, and checkout sessions detected.
+
+---
+
+## Reordering Processor Modes
+
+The pipeline supports three interchangeable reordering processors. All three share identical core logic (Part 1 event-time flush and Part 2 idle flush described above) via a shared static `process()` method. They differ only in how the sorted event buffer is stored, which directly determines checkpoint/savepoint support and throughput under load.
+
+The active processor is selected at job submission time:
+
+- **CLI argument** (highest priority): `--processor <heap|state|merge>`
+- **Environment variable**: `CLICKSTREAM_PROCESSOR=<heap|state|merge>`
+- **Default** (if neither is set): `state`
+
+### Implementations
+
+**`ClickStreamReorderUsingHeap`** — `--processor heap`
+
+Stores the sorted event buffer in a JVM `ConcurrentHashMap<String, ArrayList<ClickStream>>` held in heap memory. No serialization occurs on the hot write path — events are inserted directly into the in-memory list. Timer and idle-detection metadata are still kept in `ValueState` (and therefore checkpointed), but the buffer itself is ephemeral: it is lost on TaskManager restart. Recovery replays events from Kafka offsets.
+
+Use this mode when restart recovery from Kafka is acceptable and minimizing latency is the priority.
+
+**`ClickStreamReorderUsingState`** — `--processor state` (default)
+
+Stores the sorted event buffer as `ValueState<ArrayList<ClickStream>>` backed by RocksDB. Every incoming event requires a full **deserialize → insert → serialize → write** round-trip: the entire buffer is read from RocksDB, a new event is inserted in sorted order, and the full buffer is written back. This is the heaviest-weight path in terms of I/O but provides complete checkpoint and savepoint support with exact-once state recovery.
+
+Use this mode when fault-tolerance is mandatory and throughput is secondary.
+
+**`ClickStreamReorderUsingMergeState`** — `--processor merge`
+
+Stores the sorted event buffer as `AggregatingMergeState` backed by RocksDB's native MergeOperator. Each incoming event is appended as a merge operand via `bufferState.add(event)` — a pure append with no prior read. The actual sorted merge of operands is deferred to background compaction and to the single `get()` call when the buffer is flushed. Auxiliary `ValueState` entries (`numBufferedEventsState`, `maxEventTimeState`) are updated on every event to allow cheap empty/span checks without deserializing the full buffer. A custom binary serializer (`SortedListAccumulatorSerializer`) replaces Kryo for more compact encoding.
+
+Full checkpoint and savepoint support is provided. Throughput is comparable to the Heap mode because the per-event write path is allocation-free and read-free.
+
+Use this mode when both fault-tolerance and high throughput are required.
+
+### Performance Comparison
+
+Benchmarks were run on a single-node local stack (Flink parallelism 2) with the Python producer generating events at approximately 1,000 records/sec for 40 minutes.
+
+| Processor | `--processor` | Throughput | Backpressure | Consumer Lag | Runtime for 40-min dataset | Fault-tolerant buffer |
+|---|---|---|---|---|---|---|
+| Heap | `heap` | ~1,000 rec/s | None | None | ~40 min | No |
+| State (RocksDB ValueState) | `state` (default) | ~500 rec/s | Continuous | Yes (~13 K records) | ~80 min | Yes |
+| MergeState (RocksDB Merge) | `merge` | ~1,000 rec/s | None | None | ~40 min | Yes |
+
+The MergeState processor matches Heap throughput because it eliminates the read-before-write bottleneck that makes the State processor slow. With ValueState, every event forces a RocksDB point-read; with MergeOperator, every event is a pure append and the combining work is deferred to the single read at flush time.
+
+**Heap processor** (`--processor heap`)
+
+![Heap processor Grafana dashboard](docs/heap.png)
+
+**State processor** (`--processor state`, default)
+
+![State processor Grafana dashboard](docs/state.png)
+
+**MergeState processor** (`--processor merge`)
+
+![MergeState processor Grafana dashboard](docs/merge.png)
+
+Each dashboard shows: Records In/Out Per Second (by operator), Backpressure ratio, and Kafka Source consumer lag over the test window.
 
 ---
 
@@ -335,9 +397,11 @@ flink_streaming_event_reordering/
     │   ├── CheckoutSession.java         # Checkout output POJO; carries price from Checkout event
     │   └── PriceStats.java             # Price aggregation output POJO (min/max/avg per window)
     └── function/
-        ├── ClickStreamParser.java       # FlatMapFunction: JSON → ClickStream; reads properties.price
-        ├── ClickStreamProcessFunction.java  # KeyedProcessFunction: reorder + checkout detection
-        └── PriceStatsWindowFunction.java    # KeyedProcessFunction: 5-min tumbling window price stats
+        ├── ClickStreamParser.java              # FlatMapFunction: JSON → ClickStream; reads properties.price
+        ├── ClickStreamReorderUsingHeap.java    # KeyedProcessFunction: heap-backed reorder (fast, no buffer checkpoint)
+        ├── ClickStreamReorderUsingState.java   # KeyedProcessFunction: RocksDB ValueState reorder (full fault-tolerance)
+        ├── ClickStreamReorderUsingMergeState.java  # KeyedProcessFunction: RocksDB MergeOperator reorder (fast + fault-tolerant)
+        └── PriceStatsWindowFunction.java       # KeyedProcessFunction: 5-min tumbling window price stats
                                              # Uses ReducingState (RocksDBReducingMergeState) for min/max
                                              # Uses AggregatingState (RocksDBAggregatingMergeState) for avg
 ```
@@ -476,8 +540,11 @@ The Flink job reads all Kafka configuration from environment variables. These ar
 | `KAFKA_OUTPUT_TOPIC` | `checkout-session` | Checkout session sink topic |
 | `KAFKA_PRICE_STATS_TOPIC` | `price-stats` | Price aggregation sink topic |
 | `KAFKA_CONSUMER_GROUP` | `clickstream-reordering` | Consumer group ID |
+| `CLICKSTREAM_PROCESSOR` | `state` | Reordering processor: `heap`, `state`, or `merge` (see [Reordering Processor Modes](#reordering-processor-modes)) |
 
-### Key constants in `ClickStreamProcessFunction`
+The `--processor <heap|state|merge>` CLI argument takes precedence over `CLICKSTREAM_PROCESSOR` when both are set.
+
+### Key constants in `ClickStreamReorder*`
 
 These are compile-time constants; change them in the source and rebuild if you need different behaviour.
 
