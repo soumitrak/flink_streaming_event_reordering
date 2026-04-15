@@ -48,8 +48,6 @@ public class ClickStreamReorderUsingState
     /** State TTL – entries idle longer than this are garbage-collected. */
     private static final long STATE_TTL_MINUTES = ClickStreamReorderUsingHeap.STATE_TTL_MINUTES;
 
-    /** Comparator that orders {@link ClickStream} events by ascending event-time. */
-    private static final Comparator<ClickStream> BY_EVENT_TIME = ClickStreamReorderUsingHeap.BY_EVENT_TIME;
     // ------------------------------------------------------------------ state descriptors
 
     /**

@@ -55,6 +55,9 @@ INPUT_TOPIC       ?= clickstream
 OUTPUT_TOPIC      ?= checkout-session
 PRICE_STATS_TOPIC ?= price-stats
 
+# Reorder process function: heap | state | merge  (default: state)
+PROCESSOR       ?= state
+
 # Flink REST endpoint
 FLINK_REST      ?= http://localhost:8081
 
@@ -307,7 +310,8 @@ consume-price-stats:
 # ---------------------------------------------------------------------------
 
 ## Upload the fat JAR to Flink and start the job.
-## The job reads Kafka config from env vars set in podman-compose.yml.
+## PROCESSOR=heap|state|merge selects the reorder function (default: state).
+## Example: make submit-job PROCESSOR=merge
 submit-job: $(JAR) cancel-jobs
 	@printf '\n==> Uploading $(JAR) to Flink REST API …\n'
 	@JAR_ID=$$(curl -sf -X POST -H "Expect:" \
@@ -320,7 +324,7 @@ submit-job: $(JAR) cancel-jobs
 	&& JOB_RESPONSE=$$(curl -sf -X POST \
 		"$(FLINK_REST)/jars/$$JAR_ID/run" \
 		-H "Content-Type: application/json" \
-		-d "{\"entryClass\":\"com.example.clickstream.ClickStreamJob\",\"parallelism\":1}") \
+		-d "{\"entryClass\":\"com.example.clickstream.ClickStreamJob\",\"parallelism\":1,\"programArgsList\":[\"--processor\",\"$(PROCESSOR)\"]}") \
 	&& printf '==> Job response  : %s\n' "$$JOB_RESPONSE" \
 	&& printf '\n==> Job submitted! Watch progress at $(FLINK_REST)\n'
 

@@ -1161,44 +1161,6 @@
     },
 
     {
-      "id": 38,
-      "type": "timeseries",
-      "title": "Write Stalled (1 = stalled)",
-      "description": "1 means RocksDB is throttling writes for this column family due to compaction pressure. Sustained stalls precede stopped writes.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "max": 1,
-          "color": { "mode": "thresholds" },
-          "custom": { "lineWidth": 2, "fillOpacity": 25 },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "none" }
-      },
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "flink_taskmanager_job_task_operator_column_family_rocksdb_is_write_stalled{job_name=~\"$job_name\"}",
-          "legendFormat": "{{operator_name}} / {{column_family}}",
-          "refId": "A"
-        }
-      ],
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 109 }
-    },
-
-    {
       "id": 39,
       "type": "timeseries",
       "title": "Write Stopped (1 = stopped)",
@@ -1233,7 +1195,7 @@
           "refId": "A"
         }
       ],
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 109 }
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 109 }
     }
 
   ]

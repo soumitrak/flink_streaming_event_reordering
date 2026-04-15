@@ -143,7 +143,6 @@ services:
         state.backend.rocksdb.metrics.num-running-compactions: true
         state.backend.rocksdb.metrics.num-running-flushes: true
         state.backend.rocksdb.metrics.actual-delayed-write-rate: true
-        state.backend.rocksdb.metrics.is-write-stalled: true
         state.backend.rocksdb.metrics.is-write-stopped: true
         state.backend.rocksdb.metrics.background-errors: true
         state.backend.rocksdb.metrics.block-cache-capacity: true
@@ -159,6 +158,7 @@ services:
       KAFKA_INPUT_TOPIC: "clickstream"
       KAFKA_OUTPUT_TOPIC: "checkout-session"
       KAFKA_CONSUMER_GROUP: "clickstream-reordering"
+      CLICKSTREAM_PROCESSOR: "${PROCESSOR:-state}"
     depends_on:
       - kafka
 
@@ -197,7 +197,6 @@ services:
         state.backend.rocksdb.metrics.num-running-compactions: true
         state.backend.rocksdb.metrics.num-running-flushes: true
         state.backend.rocksdb.metrics.actual-delayed-write-rate: true
-        state.backend.rocksdb.metrics.is-write-stalled: true
         state.backend.rocksdb.metrics.is-write-stopped: true
         state.backend.rocksdb.metrics.background-errors: true
         state.backend.rocksdb.metrics.block-cache-capacity: true
@@ -217,6 +216,7 @@ services:
       KAFKA_INPUT_TOPIC: "clickstream"
       KAFKA_OUTPUT_TOPIC: "checkout-session"
       KAFKA_CONSUMER_GROUP: "clickstream-reordering"
+      CLICKSTREAM_PROCESSOR: "${PROCESSOR:-state}"
     depends_on:
       - jobmanager
 

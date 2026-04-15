@@ -15,10 +15,9 @@ import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.kafka.clients.consumer.OffsetResetStrategy;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
-import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 
 import java.util.Properties;
 
@@ -62,6 +61,15 @@ public class ClickStreamJob {
         String priceStatsTopic   = envOrDefault("KAFKA_PRICE_STATS_TOPIC",   "price-stats");
         String consumerGroup     = envOrDefault("KAFKA_CONSUMER_GROUP",      "clickstream-reordering");
 
+        // --processor <heap|state|merge>  CLI arg overrides CLICKSTREAM_PROCESSOR env var.
+        String processor = envOrDefault("CLICKSTREAM_PROCESSOR", "state");
+        for (int i = 0; i < args.length - 1; i++) {
+            if ("--processor".equals(args[i])) {
+                processor = args[i + 1];
+                break;
+            }
+        }
+
         // ------------------------------------------------------------------ Flink env
         // State backend, checkpointing, and RocksDB tuning are configured via
         // FLINK_PROPERTIES in podman-compose.yml (state.backend.type, execution.checkpointing.*,
@@ -102,74 +110,76 @@ public class ClickStreamJob {
                 .name("parse-and-filter")
                 .uid("parse-and-filter");
 
-        if (true) {
-            DataStream<CheckoutSession> checkoutStream = clickStream
-                    // Key by (user_id, session_id) so each user's session is processed together.
-                    .keyBy(cs -> "" + cs.getUserId()) // + "_" + cs.getSessionId())
-                    // Reorder events and detect checkout sequences.
-                    .process(new ClickStreamReorderUsingMergeState())
-                    .name("reorder-and-detect-checkout")
-                    .uid("reorder-and-detect-checkout");
-
-            // ------------------------------------------------------------------ Kafka sink
-            Properties producerProps = new Properties();
-            // Idempotent producer for exactly-once semantics (when combined with checkpointing).
-            producerProps.setProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
-            producerProps.setProperty(ProducerConfig.ACKS_CONFIG, "all");
-
-            KafkaSink<String> kafkaSink = KafkaSink.<String>builder()
-                    .setBootstrapServers(bootstrapServers)
-                    .setKafkaProducerConfig(producerProps)
-                    .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
-                    .setRecordSerializer(
-                            KafkaRecordSerializationSchema.<String>builder()
-                                    .setTopic(outputTopic)
-                                    .setValueSerializationSchema(new SimpleStringSchema())
-                                    .build())
-                    .build();
-
-            checkoutStream
-                    .map(new CheckoutSessionSerializer())
-                    .name("serialize-checkout-session")
-                    .uid("serialize-checkout-session")
-                    .sinkTo(kafkaSink)
-                    .name("kafka-sink-checkout-session")
-                    .uid("kafka-sink-checkout-session");
-
-            // ------------------------------------------------------------------ price-stats sink
-            KafkaSink<String> priceStatsSink = KafkaSink.<String>builder()
-                    .setBootstrapServers(bootstrapServers)
-                    .setKafkaProducerConfig(producerProps)
-                    .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
-                    .setRecordSerializer(
-                            KafkaRecordSerializationSchema.<String>builder()
-                                    .setTopic(priceStatsTopic)
-                                    .setValueSerializationSchema(new SimpleStringSchema())
-                                    .build())
-                    .build();
-
-            // 5-minute processing-time tumbling window: aggregate min, max, and average checkout
-            // prices using ReducingState (→ RocksDBReducingMergeState) for min/max and
-            // AggregatingState (→ RocksDBAggregatingMergeState) for the running average.
-            // Key by constant "global" so all sessions contribute to the same aggregation.
-            checkoutStream
-                    .keyBy(session -> "global")
-                    .process(new PriceStatsWindowFunction())
-                    .name("price-stats-5min-window")
-                    .uid("price-stats-5min-window")
-                    .map(new PriceStatsSerializer())
-                    .name("serialize-price-stats")
-                    .uid("serialize-price-stats")
-                    .sinkTo(priceStatsSink)
-                    .name("kafka-sink-price-stats")
-                    .uid("kafka-sink-price-stats");
+        // ------------------------------------------------------------------ processor selection
+        final KeyedProcessFunction<String, ClickStream, CheckoutSession> processorFn;
+        if ("heap".equalsIgnoreCase(processor)) {
+            processorFn = new ClickStreamReorderUsingHeap();
+        } else if ("merge".equalsIgnoreCase(processor)) {
+            processorFn = new ClickStreamReorderUsingMergeState();
         } else {
-            // Discard parsed events to measure raw Kafka → parse throughput in isolation.
-            clickStream
-                    .sinkTo(new DiscardingSink<>())
-                    .name("discard-clickstream")
-                    .uid("discard-clickstream");
+            processorFn = new ClickStreamReorderUsingState();
         }
+
+        DataStream<CheckoutSession> checkoutStream = clickStream
+                // Key by user_id so each user's events are processed together.
+                .keyBy(cs -> "" + cs.getUserId())
+                // Reorder events and detect checkout sequences.
+                .process(processorFn)
+                .name("reorder-and-detect-checkout")
+                .uid("reorder-and-detect-checkout");
+
+        // ------------------------------------------------------------------ Kafka sink
+        Properties producerProps = new Properties();
+        // Idempotent producer for exactly-once semantics (when combined with checkpointing).
+        producerProps.setProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
+        producerProps.setProperty(ProducerConfig.ACKS_CONFIG, "all");
+
+        KafkaSink<String> kafkaSink = KafkaSink.<String>builder()
+                .setBootstrapServers(bootstrapServers)
+                .setKafkaProducerConfig(producerProps)
+                .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                .setRecordSerializer(
+                        KafkaRecordSerializationSchema.<String>builder()
+                                .setTopic(outputTopic)
+                                .setValueSerializationSchema(new SimpleStringSchema())
+                                .build())
+                .build();
+
+        checkoutStream
+                .map(new CheckoutSessionSerializer())
+                .name("serialize-checkout-session")
+                .uid("serialize-checkout-session")
+                .sinkTo(kafkaSink)
+                .name("kafka-sink-checkout-session")
+                .uid("kafka-sink-checkout-session");
+
+        // ------------------------------------------------------------------ price-stats sink
+        KafkaSink<String> priceStatsSink = KafkaSink.<String>builder()
+                .setBootstrapServers(bootstrapServers)
+                .setKafkaProducerConfig(producerProps)
+                .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                .setRecordSerializer(
+                        KafkaRecordSerializationSchema.<String>builder()
+                                .setTopic(priceStatsTopic)
+                                .setValueSerializationSchema(new SimpleStringSchema())
+                                .build())
+                .build();
+
+        // 5-minute processing-time tumbling window: aggregate min, max, and average checkout
+        // prices using ReducingState (→ RocksDBReducingMergeState) for min/max and
+        // AggregatingState (→ RocksDBAggregatingMergeState) for the running average.
+        // Key by constant "global" so all sessions contribute to the same aggregation.
+        checkoutStream
+                .keyBy(session -> "global")
+                .process(new PriceStatsWindowFunction())
+                .name("price-stats-5min-window")
+                .uid("price-stats-5min-window")
+                .map(new PriceStatsSerializer())
+                .name("serialize-price-stats")
+                .uid("serialize-price-stats")
+                .sinkTo(priceStatsSink)
+                .name("kafka-sink-price-stats")
+                .uid("kafka-sink-price-stats");
         // ------------------------------------------------------------------ execute
         env.execute("Flink Clickstream Event Reordering");
     }
