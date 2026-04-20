@@ -29,6 +29,8 @@ __pycache__/
 # Podman / Docker volumes materialised on the host (unlikely but safe to ignore)
 kafka-data/
 flink-checkpoints/
+prometheus-data/
+grafana-data/
 
 # Environment files (never commit secrets)
 .env

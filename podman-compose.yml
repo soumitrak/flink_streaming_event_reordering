@@ -27,8 +27,6 @@ networks:
 
 volumes:
   kafka-data:
-  prometheus-data:
-  grafana-data:
 
 # ---------------------------------------------------------------------------
 # Re-usable YAML anchors
@@ -234,9 +232,29 @@ services:
     depends_on:
       - kafka
 
+  # ---------- Node Exporter (Linux host CPU / memory / disk I/O metrics) ----------
+  node-exporter:
+    image: prom/node-exporter:latest
+    platform: ${PLATFORM:-linux/amd64}
+    container_name: clickstream-node-exporter
+    hostname: node-exporter
+    networks:
+      - clickstream-net
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/rootfs:ro,rslave
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/host/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+
   # ---------- Prometheus ----------
   prometheus:
     image: prom/prometheus:latest
+    user: "0"
     platform: ${PLATFORM:-linux/amd64}
     container_name: clickstream-prometheus
     hostname: prometheus
@@ -246,20 +264,21 @@ services:
       - "9090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
+      - ./prometheus-data/link:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=7d
       - --web.enable-lifecycle
-    depends_on:
-      - kafka-exporter
-      - jobmanager
-      - taskmanager
+#   depends_on:
+#     - kafka-exporter
+#     - jobmanager
+#     - taskmanager
 
   # ---------- Grafana ----------
   grafana:
     image: grafana/grafana:latest
+    user: "0"
     platform: ${PLATFORM:-linux/amd64}
     container_name: clickstream-grafana
     hostname: grafana
@@ -273,7 +292,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     volumes:
-      - grafana-data:/var/lib/grafana
+      - ./grafana-data/link:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
