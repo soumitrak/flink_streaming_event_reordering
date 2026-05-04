@@ -275,6 +275,19 @@ services:
 #     - jobmanager
 #     - taskmanager
 
+  # ---------- Grafana Image Renderer (remote renderer sidecar) ----------
+  renderer:
+    image: grafana/grafana-image-renderer:latest
+    platform: ${PLATFORM:-linux/amd64}
+    container_name: clickstream-renderer
+    hostname: renderer
+    networks:
+      - clickstream-net
+    environment:
+      ENABLE_METRICS: "true"
+      LOG_LEVEL: "info"
+      AUTH_TOKEN: "clickstream-renderer-token"
+
   # ---------- Grafana ----------
   grafana:
     image: grafana/grafana:latest
@@ -291,9 +304,14 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_RENDERING_SERVER_URL: "http://renderer:8081/render"
+      GF_RENDERING_CALLBACK_URL: "http://grafana:3000/"
+      GF_RENDERING_CONCURRENT_RENDER_LIMIT: "2"
+      GF_RENDERING_RENDERER_TOKEN: "clickstream-renderer-token"
     volumes:
       - ./grafana-data/link:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+      - renderer
