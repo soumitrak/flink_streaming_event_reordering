@@ -11,6 +11,7 @@ A Apache Flink 2.2 streaming application that reads clickstream events from Kafk
 - [Event Schemas](#event-schemas)
 - [Processing Logic](#processing-logic)
 - [Reordering Processor Modes](#reordering-processor-modes)
+- [RocksDB Configuration](#rocksdb-configuration)
 - [Price Aggregation — RocksDB MergeOperator Design](#price-aggregation--rocksdb-mergeoperator-design)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
@@ -255,27 +256,158 @@ Use this mode when both fault-tolerance and high throughput are required.
 
 Benchmarks were run on a single-node local stack (Flink parallelism 2) with the Python producer generating events at approximately 1,000 records/sec for 40 minutes.
 
-| Processor | `--processor` | Throughput | Backpressure | Consumer Lag | Runtime for 40-min dataset | Fault-tolerant buffer |
-|---|---|---|---|---|---|---|
-| Heap | `heap` | ~1,000 rec/s | None | None | ~40 min | No |
-| State (RocksDB ValueState) | `state` (default) | ~500 rec/s | Continuous | Yes (~13 K records) | ~80 min | Yes |
-| MergeState (RocksDB Merge) | `merge` | ~1,000 rec/s | None | None | ~40 min | Yes |
+| Processor | `--processor` | Throughput | Backpressure | Consumer lag profile | Runtime for 40-min dataset | Fault-tolerant buffer | RocksDB I/O | JVM heap pressure | Checkpoint size |
+|---|---|---|---|---|---|---|---|---|---|
+| Heap | `heap` | ~1,000 rec/s | None | Grows → drains cleanly | ~42 min | No | Near-zero | Highest | Smallest |
+| State (RocksDB ValueState) | `state` (default) | ~500 rec/s | Continuous | Grows → drains slowly | ~80 min | Yes | Highest | Low | Largest |
+| MergeState (RocksDB Merge) | `merge` | ~1,000 rec/s | None | Grows → drains cleanly | ~42 min | Yes | Moderate | Low | Moderate |
 
-The MergeState processor matches Heap throughput because it eliminates the read-before-write bottleneck that makes the State processor slow. With ValueState, every event forces a RocksDB point-read; with MergeOperator, every event is a pure append and the combining work is deferred to the single read at flush time.
+#### Why the throughput differs
+
+With **ValueState** (`state` mode), every incoming event forces a full **read → deserialize entire ArrayList → insert → serialize → write** round-trip to RocksDB — two blocking I/O operations per event. This is the sole bottleneck: the operator falls behind the Kafka source rate, generating sustained backpressure and a persistently growing consumer lag.
+
+With **MergeOperator** (`merge` mode), each event is a pure **append** (`db.Merge(key, operand)`) — no prior read. The sorting and combining work is deferred to RocksDB background compaction and to the single `get()` call when the buffer is flushed. This eliminates the per-event read bottleneck entirely, bringing throughput back to the same level as the in-memory Heap mode.
+
+#### Dashboard observations
 
 **Heap processor** (`--processor heap`)
 
-![Heap processor Grafana dashboard](docs/heap.png)
+![Heap processor Grafana dashboard](docs/heap-dashboard.png)
+
+- Job completed the 40-minute dataset in ~42 minutes with no backpressure.
+- Consumer lag follows a clean triangular profile: accumulates during replay, then fully drains.
+- RocksDB memtable and SST panels are near-zero — the sort buffer never touches RocksDB.
+- JVM heap usage is the highest of the three modes; all sort buffers live on the JVM heap, competing with Flink's managed memory.
+- Checkpoints are small and fast (only timer metadata is persisted).
 
 **State processor** (`--processor state`, default)
 
-![State processor Grafana dashboard](docs/state.png)
+![State processor Grafana dashboard](docs/state-dashboard.png)
+
+- Job took ~80 minutes for the same dataset — approximately 2× slower.
+- Consumer lag peaks higher and drains more slowly; sustained backpressure is visible in the operator metrics.
+- RocksDB shows the highest activity of the three modes: larger active and immutable memtables, more pending compaction bytes, and higher SST file churn — all consistent with the per-event read+write cycle.
+- Checkpoints are the largest because the full `ArrayList` is serialized per key at every checkpoint interval.
 
 **MergeState processor** (`--processor merge`)
 
-![MergeState processor Grafana dashboard](docs/merge.png)
+![MergeState processor Grafana dashboard](docs/merge-dashboard.png)
 
-Each dashboard shows: Records In/Out Per Second (by operator), Backpressure ratio, and Kafka Source consumer lag over the test window.
+- Job completed the 40-minute dataset in ~42 minutes — statistically identical to Heap.
+- Consumer lag profile matches Heap exactly: clean triangular accumulate-and-drain.
+- RocksDB memtable shows live entries (merge operands accumulating) but SST compaction is low and deferred — append writes are non-blocking.
+- JVM heap usage is lower than Heap mode because the sort buffer is offloaded to RocksDB.
+- Full durable state: a TaskManager restart recovers the sort buffer from the RocksDB checkpoint rather than replaying from Kafka.
+
+#### Choosing a processor
+
+| Priority | Recommended mode |
+|---|---|
+| Maximum throughput; Kafka offset replay on restart is acceptable | `heap` |
+| Maximum throughput **and** durable fault-tolerant state | `merge` |
+| Simplicity and standard Flink state; throughput is secondary | `state` (default) |
+
+`merge` is the sweet spot for production: it matches Heap throughput while providing RocksDB-backed durability, at the cost of a more complex custom serializer and MergeOperator implementation.
+
+---
+
+## RocksDB Configuration
+
+RocksDB is the state backend for all three processor modes (even `heap`, which uses RocksDB for timer metadata). The configuration is split between Flink properties in `podman-compose.yml` and a custom `RocksDBOptionsFactory` in [AggressiveCompactionOptions.java](src/main/java/com/example/clickstream/AggressiveCompactionOptions.java).
+
+### Flink properties (`podman-compose.yml`)
+
+#### State backend and checkpointing
+
+| Property | Value | Purpose |
+|---|---|---|
+| `state.backend.type` | `rocksdb` | Use RocksDB instead of the default heap state backend |
+| `state.backend.incremental` | `true` | Upload only changed SST files on each checkpoint, not the full state |
+| `state.checkpoints.dir` | `file:///tmp/flink-checkpoints` | Local directory for checkpoint data |
+| `execution.checkpointing.interval` | `600000` (10 min) | Checkpoint every 10 minutes |
+
+#### Write buffer tuning (TaskManager only)
+
+These are set in the TaskManager's `FLINK_PROPERTIES` and passed as `currentOptions` to the `RocksDBOptionsFactory`. They are then **overridden** by `AggressiveCompactionOptions` (see below), so the effective values come from the factory.
+
+| Property | Config value | Effective value (factory override) |
+|---|---|---|
+| `state.backend.rocksdb.writebuffer.size` | 16 MB | **4 MB** (factory: `setWriteBufferSize`) |
+| `state.backend.rocksdb.writebuffer.count` | 10 | **4** (factory: `setMaxWriteBufferNumber`) |
+| `state.backend.rocksdb.writebuffer.number-to-merge` | 2 | **1** (factory: `setMinWriteBufferNumberToMerge`) |
+
+#### RocksDB metrics exported to Prometheus
+
+The following metrics are enabled per column family (`column-family-as-variable: true`) and appear in the Grafana dashboard:
+
+| Metric group | Metrics enabled |
+|---|---|
+| MemTable | `cur-size-active-mem-table`, `cur-size-all-mem-tables`, `num-entries-active-mem-table`, `num-entries-imm-mem-tables`, `num-deletes-active-mem-table`, `num-deletes-imm-mem-tables` |
+| SST / Live data | `estimate-num-keys`, `estimate-live-data-size`, `total-sst-files-size`, `live-sst-files-size` |
+| Compaction | `estimate-pending-compaction-bytes`, `num-running-compactions`, `num-running-flushes` |
+| Write stalls | `actual-delayed-write-rate`, `is-write-stopped`, `background-errors` |
+| Block cache | `block-cache-capacity`, `block-cache-usage`, `block-cache-pinned-usage` |
+
+#### RocksDB logging (TaskManager)
+
+| Property | Value |
+|---|---|
+| `state.backend.rocksdb.log.level` | `INFO_LEVEL` |
+| `state.backend.rocksdb.log.dir` | `/tmp/flink-rocksdb-logs` |
+| `state.backend.rocksdb.log.max-file-size` | 64 MB |
+| `state.backend.rocksdb.log.file-num` | 4 (rotating) |
+
+### `AggressiveCompactionOptions` factory
+
+Registered via `state.backend.rocksdb.options-factory: com.example.clickstream.AggressiveCompactionOptions`, this factory overrides the Flink defaults after the config properties are applied.
+
+**`DBOptions` (database-wide)**
+
+| Setting | Value | Effect |
+|---|---|---|
+| `setMaxBackgroundCompactions` | 4 | Up to 4 threads dedicated to SST compaction |
+| `setMaxBackgroundFlushes` | 2 | Up to 2 threads dedicated to memtable-to-L0 flushes |
+| `setIncreaseParallelism` | 6 | Total background thread pool size (compaction + flush combined) |
+
+**`ColumnFamilyOptions` (per state column family)**
+
+| Setting | Value | Effect |
+|---|---|---|
+| `setLevel0FileNumCompactionTrigger` | 2 | Start a compaction as soon as 2 L0 files exist (default is 4) |
+| `setMaxWriteBufferNumber` | 4 | At most 4 memtables in memory at once (active + immutable) |
+| `setMinWriteBufferNumberToMerge` | 1 | Flush a memtable to L0 as soon as 1 becomes immutable |
+| `setWriteBufferSize` | 4 MB | Each memtable is 4 MB; fills in ~20 s at 1,000 events/sec × ~200 B/event |
+
+The combined effect is a **fast, eager flush-and-compact cycle**: small memtables fill quickly → flushed immediately to L0 → L0 compacted into L1 as soon as 2 files exist → the read path always sees a compact, low-level-count LSM tree.
+
+### How the configuration helps each processor mode
+
+#### Heap mode
+
+The sort buffer lives entirely on the JVM heap. RocksDB only stores timer metadata — a handful of `Long` values per active key. Write volume is negligible, so the aggressive compaction settings have minimal impact on data throughput. Their main benefit here is keeping the metadata SSTs compact and checkpoint sizes small, ensuring checkpoint I/O does not interfere with the processing pipeline.
+
+Incremental checkpointing (`state.backend.incremental: true`) is particularly valuable: since the timer state changes infrequently, almost nothing is uploaded on each checkpoint, so the 10-minute checkpoint interval imposes near-zero overhead.
+
+#### State mode
+
+The sort buffer is a `ValueState<ArrayList<ClickStream>>` backed by RocksDB. Every incoming event triggers a full **point-read → deserialize → insert → serialize → point-write** cycle. This is the heaviest write pattern of the three modes, and the configuration tries to minimise its cost:
+
+- **Small write buffers (4 MB, flush at 1 immutable):** The active memtable is small and written to L0 quickly. More recent point-writes are always in a fresh, unfragmented memtable, reducing write amplification per individual key update.
+- **Aggressive L0 compaction (trigger at 2 files):** The point-read latency is dominated by how many SST files RocksDB must search. By keeping L0 small (≤ 2 files before compaction) and the LSM tree compact (up to 4 background compaction threads), the read amplification — and therefore the per-event round-trip latency — is kept as low as possible.
+- **Incremental checkpoints:** The full buffer ArrayList is serialised into SST files. Incremental checkpoints upload only the SST files that changed since the last checkpoint, limiting checkpoint I/O to the fraction of keys that were modified in the interval rather than uploading the entire state.
+
+Despite these mitigations, the fundamental bottleneck — two blocking RocksDB operations per event — cannot be tuned away. The configuration reduces the cost of each operation but does not change the asymptotic behavior.
+
+#### Merge mode
+
+The sort buffer is an `AggregatingMergeState` backed by RocksDB's MergeOperator. Each event is a pure **append** with no prior read; the combining work is deferred to background compaction and to the single `get()` at flush time. This is where the aggressive compaction configuration delivers its greatest benefit:
+
+- **Small write buffers (4 MB, flush at 1 immutable):** Merge operands accumulate in the active memtable at ~200 KB/sec. A 4 MB buffer fills in ~20 seconds and is immediately flushed to L0, bounding the in-memory accumulation and keeping each flush small enough to complete without blocking the processing thread.
+- **Aggressive L0 compaction (trigger at 2 files):** L0 files holding merge operands are compacted into L1 quickly. During compaction, RocksDB calls the merge operator's `fullMerge` / `partialMerge` functions to fold operands into the base value. This means the combining work — sorting and merging the per-key event lists — is distributed continuously across background threads rather than accumulating into a large deferred cost at flush time.
+- **4 background compaction threads + 2 flush threads:** The flush-and-compact pipeline can sustain the write rate of ~1,000 events/sec without building a backlog. If compaction falls behind, merge operands pile up across many L0 files, and the single `get()` at flush must fold all of them in one blocking call — degrading the flush latency. Sufficient background threads prevent this.
+- **Incremental checkpoints:** Only the SST files containing new merge operands (those written since the last checkpoint) are uploaded. Because operands are append-only and compacted in the background, the incremental delta per 10-minute checkpoint interval is a small fraction of the total state size.
+
+The net result: merge operands are folded continuously in the background, the `get()` at flush time sees a nearly-compacted LSM tree with minimal read amplification, and the hot write path (the processing thread) is never blocked by a read.
 
 ---
 

@@ -142,18 +142,133 @@ Best among all approaches. The combination of event-time-driven (Part 1) and wal
 
 ---
 
+## 5. Custom Watermark + Event-Time Windowing
+
+This section compares the implemented `KeyedProcessFunction` against an alternative Flink-idiomatic approach: assigning event-timestamps via a custom `WatermarkStrategy` and using Flink's built-in event-time windows.
+
+### How it would work
+
+```java
+WatermarkStrategy<ClickStream> strategy = WatermarkStrategy
+    .<ClickStream>forBoundedOutOfOrderness(Duration.ofMinutes(5))
+    .withTimestampAssigner((event, ts) -> event.getEventTimeMillis())
+    .withIdleness(Duration.ofMinutes(5));   // prevent stall on idle partitions
+
+env.fromSource(kafkaSource, strategy, "source")
+   .keyBy(cs -> cs.getUserId() + "_" + cs.getSessionId())
+   .window(EventTimeSessionWindows.withGap(Time.minutes(5)))
+   .allowedLateness(Duration.ofMinutes(5))
+   .process(new CheckoutDetectionWindowFunction());
+```
+
+Inside `CheckoutDetectionWindowFunction`, the same sliding-scan logic (last ≤ 5 events before Checkout within 1 minute) must still be implemented manually. The watermark mechanism handles *when* to fire; the checkout-detection logic itself is no simpler.
+
+### Structural differences from the current implementation
+
+| Aspect | Custom Watermark + Window | Current `KeyedProcessFunction` |
+|---|---|---|
+| **Progress tracking** | Global watermark broadcast across all subtasks | Per-key local span (`maxET − minET`) |
+| **Flush trigger** | Watermark passes window-end + allowed lateness | Local span > 6 min (Part 1) or wall-clock idle (Part 2) |
+| **Late event handling** | `allowedLateness` / side output — window re-fires | Inserted into sorted buffer; processed normally |
+| **Buffer trimming** | Window holds all events until it fires | Continuous front-trim as events are confirmed irrelevant |
+| **Timer type** | Event-time (driven by watermark) | Processing-time (driven by wall clock) |
+| **Partition stall risk** | Yes — slowest partition stalls global watermark | No — per-key timers advance independently |
+
+---
+
+### Pros of Custom Watermark + Windowing
+
+**1. First-class Flink primitive**
+Watermarks are a core Flink concept. Checkpointing, exactly-once guarantees, and operator state are all designed around watermark semantics. Event-time windows integrate cleanly with Flink's fault-tolerance mechanisms.
+
+**2. Global progress visibility**
+Flink tracks the watermark lag as a built-in metric, visible in the Web UI and Prometheus. This makes it straightforward to monitor how far behind the job is from real time without any custom instrumentation.
+
+**3. Simpler trigger logic**
+Window firing is handled entirely by Flink's internal watermark machinery. There is no manual timer registration, cancellation, or rescheduling — reducing the surface area for bugs.
+
+**4. Deterministic unit testing**
+Event-time windows can be driven forward in unit tests by injecting `Watermark` elements, making test scenarios fully reproducible and independent of wall-clock time.
+
+**5. Correct idle-partition handling via `withIdleness`**
+`WatermarkStrategy.withIdleness()` marks a partition idle after a configurable timeout, allowing the global watermark to advance past it. This is a well-tested, declarative solution to the stall problem.
+
+**6. Exactly-once end-to-end (with Kafka transactions)**
+Flink can coordinate watermark-aligned checkpoints with Kafka transactional sinks, enabling exactly-once output semantics without application-level deduplication logic.
+
+---
+
+### Cons of Custom Watermark + Windowing
+
+**1. Watermark stall on slow or empty partitions**
+A watermark is the minimum across all source partitions. If even one Kafka partition receives no events, the watermark stalls globally — blocking every window across every key from firing. `withIdleness` mitigates but does not fully eliminate this: the timeout must be tuned carefully, and it does not help when a partition is slow rather than completely idle.
+
+**2. Forced window type — boundary-split problem persists**
+Even with correct watermarks, a window type must still be chosen. Tumbling and sliding windows suffer from the boundary-split problem described in §1 and §2. The only boundary-free option is the session window, which reintroduces the output-latency problem (gap + lateness = up to 10 minutes, §3). Custom watermarks solve *when windows fire*, not *which window to use*.
+
+**3. Higher output latency than Part 1**
+An event-time window can fire no earlier than when the watermark advances past `window_end + allowed_lateness`. For a 1-minute checkout window with 5-minute lateness, the earliest possible output for any session is 6 minutes after the last event in the window — even if the Checkout occurred in the first few seconds. The current Part 1 fires as soon as the per-key span condition is met, which can be seconds after the post-session events arrive.
+
+**4. No continuous front-trimming — memory not bounded**
+Windows accumulate all assigned events until the window fires. There is no equivalent to the current implementation's continuous dropping of confirmed-irrelevant events from the buffer front. For a key with a long session and no Checkout, the window holds every event in memory until the gap expires — the same memory problem described in the historical-replay analysis.
+
+**5. Detection logic is equally complex inside the window function**
+A `ProcessWindowFunction` still needs to implement the sliding-window scan for "last ≤ 5 events before Checkout". The watermark approach offloads the *when-to-flush* concern to Flink, but the *what-to-detect* concern is unchanged. The complexity shifts rather than disappears.
+
+**6. Out-of-order events arriving after `allowedLateness` are silently dropped**
+Events arriving after the window has fully closed (watermark > window_end + allowed_lateness) are directed to a side output or discarded. In the current implementation, any event arriving while the buffer is alive is processed correctly — there is no hard cut-off; Part 2 handles the eventual cleanup.
+
+**7. Idle-session flushing is watermark-dependent**
+If the watermark is stalled (e.g. a slow partition), idle sessions are never flushed until the watermark catches up. In the current implementation, processing-time timers advance independently of event arrival on any partition, guaranteeing idle sessions are eventually flushed regardless of watermark progress.
+
+---
+
+### Summary
+
+| | Custom Watermark + Window | Current `KeyedProcessFunction` |
+|---|---|---|
+| **Global progress tracking** | Yes (built-in watermark metric) | No (custom monitoring required) |
+| **Partition stall risk** | Yes (mitigated by `withIdleness`) | None (per-key processing-time timers) |
+| **Output latency** | ≥ window_size + lateness (6 min minimum) | As soon as per-key span condition met |
+| **Memory bound** | Window size × events (no continuous trim) | Hard 6-min event-time ceiling per key |
+| **Late-event correctness** | Hard cutoff at `allowedLateness` | No cutoff; buffer accepts events while alive |
+| **Deterministic unit testing** | Yes (inject watermarks) | Harder (wall-clock dependency in Part 2) |
+| **Checkpoint / exactly-once** | Full Flink support | Processing-time timers only |
+| **Idle-session flushing** | Session gap, watermark-dependent | Processing-time timer, always fires |
+| **Detection logic complexity** | Same (inside `ProcessWindowFunction`) | Same (inside `KeyedProcessFunction`) |
+
+### When to prefer custom watermarks
+
+- The job must integrate with other event-time operators downstream (joins, CEP, SQL).
+- Exactly-once end-to-end delivery is a hard requirement.
+- Operational visibility via watermark-lag metrics is important.
+- The team is more comfortable with standard Flink idioms than with custom timer management.
+
+### When the current approach is preferable
+
+- The detection criterion is a per-key sequential pattern, not a global aggregation — watermarks provide no additional correctness guarantee.
+- Memory must be bounded during historical Kafka replay (the continuous front-trim is critical).
+- Low output latency is more important than exactly-once guarantees.
+- Idle-partition stalls would cause unacceptable blocking (e.g., highly skewed key distributions or sparse Kafka partitions).
+
+---
+
 ## Consolidated Comparison
 
-| | Tumbling | Sliding | Session | KeyedProcessFunction |
-|---|---|---|---|---|
-| **Checkout sessions found** | Lowest | Moderate (with duplicates) | Good | **Best** |
-| **Events dropped** | High | Moderate | Low | **Lowest** |
-| **Memory per key** | Moderate | **Highest** | Moderate–High | **Lowest** (hard-bounded to 6 min of event-time) |
-| **Output latency** | High | Moderate | **Highest** (gap + lateness) | **Lowest** |
-| **Implementation complexity** | Low | Low | Moderate | High |
-| **Duplicate output risk** | None | **High** | Moderate (with late firings) | None |
-| **Handles multi-checkout sessions** | No | No (dedup required) | Requires custom scan | **Yes, natively** |
-| **Boundary-split problem** | Severe | Moderate | None | None |
+| | Tumbling | Sliding | Session | Custom Watermark + Window | KeyedProcessFunction |
+|---|---|---|---|---|---|
+| **Checkout sessions found** | Lowest | Moderate (with duplicates) | Good | Good | **Best** |
+| **Events dropped** | High | Moderate | Low | Low (hard cutoff at `allowedLateness`) | **Lowest** |
+| **Memory per key** | Moderate | **Highest** | Moderate–High | Moderate–High (no front-trim) | **Lowest** (hard-bounded to 6 min of event-time) |
+| **Output latency** | High | Moderate | **Highest** (gap + lateness) | High (≥ 6 min) | **Lowest** |
+| **Implementation complexity** | Low | Low | Moderate | Moderate | High |
+| **Duplicate output risk** | None | **High** | Moderate (with late firings) | Low (with `allowedLateness`) | None |
+| **Handles multi-checkout sessions** | No | No (dedup required) | Requires custom scan | Requires custom scan | **Yes, natively** |
+| **Boundary-split problem** | Severe | Moderate | None | Depends on window type | None |
+| **Global progress visibility** | N/A | N/A | N/A | **Yes** (watermark metric) | No |
+| **Partition stall risk** | N/A | N/A | N/A | Yes | **None** |
+| **Deterministic unit tests** | Yes | Yes | Yes | **Yes** (inject watermarks) | Partial |
+| **Exactly-once support** | Yes | Yes | Yes | **Yes** | Partial |
 
 ---
 
