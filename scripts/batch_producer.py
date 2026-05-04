@@ -330,4 +330,5 @@ def main():
 
 
 if __name__ == "__main__":
+    random.seed(1234567890)
     main()
