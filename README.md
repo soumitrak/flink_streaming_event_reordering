@@ -270,7 +270,7 @@ With **MergeOperator** (`merge` mode), each event is a pure **append** (`db.Merg
 
 #### Dashboard observations
 
-**Heap processor** (`--processor heap`)
+##### Heap processor (`--processor heap`)
 
 ![Heap processor Grafana dashboard](docs/heap-dashboard.png)
 
@@ -280,7 +280,7 @@ With **MergeOperator** (`merge` mode), each event is a pure **append** (`db.Merg
 - JVM heap usage is the highest of the three modes; all sort buffers live on the JVM heap, competing with Flink's managed memory.
 - Checkpoints are small and fast (only timer metadata is persisted).
 
-**State processor** (`--processor state`, default)
+##### State processor (`--processor state`)
 
 ![State processor Grafana dashboard](docs/state-dashboard.png)
 
@@ -289,7 +289,7 @@ With **MergeOperator** (`merge` mode), each event is a pure **append** (`db.Merg
 - RocksDB shows the highest activity of the three modes: larger active and immutable memtables, more pending compaction bytes, and higher SST file churn — all consistent with the per-event read+write cycle.
 - Checkpoints are the largest because the full `ArrayList` is serialized per key at every checkpoint interval.
 
-**MergeState processor** (`--processor merge`)
+##### MergeState processor (`--processor merge`)
 
 ![MergeState processor Grafana dashboard](docs/merge-dashboard.png)
 
